@@ -21,6 +21,32 @@ os.makedirs(RW_STORAGE_DIR, exist_ok=True)
 
 DATA_PATH = os.path.join(RW_STORAGE_DIR, "run_data.json")
 INVITES_PATH = os.path.join(RW_STORAGE_DIR, "invites.json")
+# --- Seed invites on first deploy (if /tmp invites empty) ---
+SEED_PATH = os.path.join("data", "invites_seed.json")
+
+def _seed_invites_if_needed():
+    try:
+        # if invites file missing or empty dict => seed
+        if not os.path.exists(INVITES_PATH):
+            os.makedirs(os.path.dirname(INVITES_PATH), exist_ok=True)
+            with open(SEED_PATH, "r", encoding="utf-8") as f:
+                seed = json.load(f)
+            with open(INVITES_PATH, "w", encoding="utf-8") as f:
+                json.dump(seed, f, ensure_ascii=False, indent=2)
+            return
+
+        with open(INVITES_PATH, "r", encoding="utf-8") as f:
+            cur = json.load(f) if f.readable() else {}
+        if isinstance(cur, dict) and len(cur) == 0:
+            with open(SEED_PATH, "r", encoding="utf-8") as f:
+                seed = json.load(f)
+            with open(INVITES_PATH, "w", encoding="utf-8") as f:
+                json.dump(seed, f, ensure_ascii=False, indent=2)
+    except Exception:
+        # fail-safe: don't block app startup
+        pass
+
+_seed_invites_if_needed()
 
 ROUTES_DIR = "routes"
 
@@ -675,7 +701,6 @@ if st.session_state.view == "picker":
     ensure_access_state(rw_data)
     save_data(DATA_PATH, rw_data)
 
-    st.caption(f"debug: user_key = {rw_data.get('profile', {}).get('auth', {}).get('user_key', '')}")
     rw_data.setdefault("profile", {})
     rw_data["profile"].setdefault("route_progress", {})
     # --- ensure Phase 3.3 fields exist (after storage schema upgrade) ---

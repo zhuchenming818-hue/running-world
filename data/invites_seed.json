@@ -1,0 +1,12 @@
+{
+  "RW-ALPHA-001": {"status": "new", "issued_to": "runner",   "issued_at": "2026-01-11", "activated_at": ""},
+  "RW-ALPHA-002": {"status": "new", "issued_to": "runner",   "issued_at": "2026-01-11", "activated_at": ""},
+  "RW-ALPHA-003": {"status": "new", "issued_to": "casual",   "issued_at": "2026-01-11", "activated_at": ""},
+  "RW-ALPHA-004": {"status": "new", "issued_to": "casual",   "issued_at": "2026-01-11", "activated_at": ""},
+  "RW-ALPHA-005": {"status": "new", "issued_to": "observer", "issued_at": "2026-01-11", "activated_at": ""},
+  "RW-ALPHA-006": {"status": "new", "issued_to": "observer", "issued_at": "2026-01-11", "activated_at": ""},
+  "RW-ALPHA-007": {"status": "new", "issued_to": "backup",   "issued_at": "2026-01-11", "activated_at": ""},
+  "RW-ALPHA-008": {"status": "new", "issued_to": "backup",   "issued_at": "2026-01-11", "activated_at": ""},
+  "RW-ALPHA-009": {"status": "new", "issued_to": "backup",   "issued_at": "2026-01-11", "activated_at": ""},
+  "RW-ALPHA-010": {"status": "new", "issued_to": "backup",   "issued_at": "2026-01-11", "activated_at": ""}
+}
