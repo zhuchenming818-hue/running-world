@@ -7,6 +7,7 @@ import streamlit as st
 import requests
 import time
 import math
+import uuid
 import textwrap
 import streamlit.components.v1 as components
 from openai import OpenAI
@@ -17,9 +18,22 @@ from datetime import date, timedelta
 # ---- Storage path (Streamlit Cloud safe) ----
 # Streamlit Community Cloud 上 repo 目录可能不可写；/tmp 是可写目录
 RW_STORAGE_DIR = os.getenv("RW_STORAGE_DIR", "/tmp/runningworld")
+def get_or_create_user_key() -> str:
+    # Streamlit query params: first open has no uk -> generate -> write to URL -> rerun
+    uk = st.query_params.get("uk")
+    if isinstance(uk, list):
+        uk = uk[0]
+    if not uk:
+        uk = "u_" + uuid.uuid4().hex
+        st.query_params["uk"] = uk
+        st.rerun()
+    return str(uk)
+
 os.makedirs(RW_STORAGE_DIR, exist_ok=True)
 
-DATA_PATH = os.path.join(RW_STORAGE_DIR, "run_data.json")
+USER_KEY = get_or_create_user_key()
+DATA_PATH = os.path.join(RW_STORAGE_DIR, f"run_data_{USER_KEY}.json")
+
 INVITES_PATH = os.path.join(RW_STORAGE_DIR, "invites.json")
 # --- Seed invites on first deploy (if /tmp invites empty) ---
 SEED_PATH = os.path.join("data", "invites_seed.json")
