@@ -14,14 +14,18 @@ from storage import load_data, save_data, add_run_km
 from storage import recompute_profile, delete_runs_by_date, load_invites, save_invites, ensure_access_state
 from datetime import date, timedelta
 
-DATA_PATH = "data/run_data.json"
+# ---- Storage path (Streamlit Cloud safe) ----
+# Streamlit Community Cloud 上 repo 目录可能不可写；/tmp 是可写目录
+RW_STORAGE_DIR = os.getenv("RW_STORAGE_DIR", "/tmp/runningworld")
+os.makedirs(RW_STORAGE_DIR, exist_ok=True)
+
+DATA_PATH = os.path.join(RW_STORAGE_DIR, "run_data.json")
+INVITES_PATH = os.path.join(RW_STORAGE_DIR, "invites.json")
 
 ROUTES_DIR = "routes"
 
 # --- Phase 3.3: minimal commercialization gating ---
-# --- Phase 3.3: minimal commercialization gating ---
 FREE_ROUTE_IDS = {"nj_bj"}  # 早期：免费路线只放南京→北京
-INVITES_PATH = "data/invites.json"
 PASS_DURATION_DAYS = 365
 ADMIN_TOKEN_ENV = "RW_ADMIN_TOKEN"
 
