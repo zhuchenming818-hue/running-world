@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import json
 import os
 import tempfile
@@ -11,7 +10,7 @@ from typing import Any, Dict, List, Optional
 
 DEFAULT_DATA: Dict[str, Any] = {
     "meta": {
-        "schema_version": 2,
+        "schema_version": 3,
         "created_at": "",
         "updated_at": ""
     },
@@ -44,7 +43,23 @@ DEFAULT_DATA: Dict[str, Any] = {
         },
 
         # per-route progress cache (you already compute it in app.py)
-        "route_progress": {}
+        "route_progress": {},
+
+        # --- Phase 4.x: multi-route state machine (v3 profile) ---
+        "v3": {
+            "mode": "free",  # free / pro
+            "free": {
+                "selected_route_id": None,
+                "progress_km": {}
+            },
+            "pro": {
+                "active": False,
+                "routes": {},  # rid -> {km, status, finished_at}
+                "reward_state": "locked",        # locked/pending/accepted/declined
+                "finished_route_id": None,
+                "reward_choice_at": None
+            }
+        }
     },
     "routes": {
         "nj_bj": {
@@ -132,7 +147,7 @@ def load_data(path: str) -> Dict[str, Any]:
     # routes: keep user's routes if present, else defaults
     merged["routes"] = data.get("routes", merged["routes"])
     merged["history"] = data.get("history", merged["history"])
-    # --- Phase 3.3 schema migration: v1 -> v2 ---
+    # --- schema migration: v1 -> v2 (Phase 3.3) ---
     old_ver = int(merged.get("meta", {}).get("schema_version", 1) or 1)
     if old_ver < 2:
         prof = merged.setdefault("profile", {})
@@ -155,6 +170,13 @@ def load_data(path: str) -> Dict[str, Any]:
         prof.setdefault("route_progress", {})
 
         merged.setdefault("meta", {})["schema_version"] = 2
+        
+    # --- schema migration: v2 -> v3 (Phase 4.1) ---
+    # v3 introduces profile.v3 (free/pro parallel progress + reward state)
+    old_ver = int(merged.get("meta", {}).get("schema_version", 2) or 2)
+    if old_ver < 3:
+        ensure_profile_v3(merged)
+        merged.setdefault("meta", {})["schema_version"] = 3
     # --- Phase 3.3.3: ensure stable anonymous user_key ---
     prof = merged.setdefault("profile", {})
     auth = prof.setdefault("auth", {"mode": "local", "invite_code": None, "user_key": None})
@@ -165,6 +187,9 @@ def load_data(path: str) -> Dict[str, Any]:
         auth["user_key"] = "u_" + uuid.uuid4().hex
     # --- Phase 3.3.4: centralize pass/entitlements ---
     ensure_access_state(merged)
+    
+    # Phase 4.1: ensure v3 exists even for already-v3 files (healing)
+    ensure_profile_v3(merged)
 
     # ensure meta timestamps
     if not merged["meta"].get("created_at"):
@@ -174,6 +199,100 @@ def load_data(path: str) -> Dict[str, Any]:
     # write back healed version
     atomic_write_json(path, merged)
     return merged
+    
+
+def ensure_profile_v3(data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Phase 4.1: introduce profile.v3 without breaking existing app.py.
+
+    Principles:
+      - Do NOT delete legacy keys (current_route_id, route_progress, etc.)
+      - Create/repair profile.v3 structure
+      - Best-effort migrate progress into v3 using existing route_progress/history
+      - Decide initial mode:
+          * if entitlements.all_routes True -> mode 'pro'
+          * else -> mode 'free'
+    """
+    profile = data.setdefault("profile", {})
+
+    # ensure Phase 3.3 keys exist (in case caller didn't go through v2 branch)
+    profile.setdefault("auth", {"mode": "local", "invite_code": None, "user_key": None})
+    profile.setdefault("pass", {"tier": "free", "status": "none", "starts_at": None, "ends_at": None, "source": "local", "notes": ""})
+    profile.setdefault("entitlements", {"all_routes": False, "ai_basic": True, "ai_plus": False, "street_view": False})
+    profile.setdefault("route_progress", {})
+
+    v3 = profile.get("v3")
+    if not isinstance(v3, dict):
+        v3 = {}
+        profile["v3"] = v3
+
+    v3.setdefault("mode", "free")
+    v3.setdefault("free", {})
+    v3.setdefault("pro", {})
+
+    free = v3["free"]
+    pro = v3["pro"]
+
+    if not isinstance(free, dict):
+        free = {}
+        v3["free"] = free
+    if not isinstance(pro, dict):
+        pro = {}
+        v3["pro"] = pro
+
+    free.setdefault("selected_route_id", None)
+    free.setdefault("progress_km", {})
+    if not isinstance(free["progress_km"], dict):
+        free["progress_km"] = {}
+
+    pro.setdefault("active", False)
+    pro.setdefault("routes", {})
+    if not isinstance(pro["routes"], dict):
+        pro["routes"] = {}
+    pro.setdefault("reward_state", "locked")
+    pro.setdefault("finished_route_id", None)
+    pro.setdefault("reward_choice_at", None)
+
+    # ---- decide initial mode by entitlements ----
+    ent = profile.get("entitlements", {})
+    has_all = bool(ent.get("all_routes", False)) if isinstance(ent, dict) else False
+    v3["mode"] = "pro" if has_all else "free"
+    pro["active"] = bool(has_all)
+
+    # ---- migrate selected free route ----
+    # prefer existing v3 selection; else use legacy current_route_id if present
+    if not free.get("selected_route_id"):
+        legacy_cur = profile.get("current_route_id")
+        if isinstance(legacy_cur, str) and legacy_cur.strip():
+            free["selected_route_id"] = legacy_cur
+
+    # ---- migrate progress into v3 ----
+    # source of truth (best effort): profile.route_progress dict (already computed in app.py)
+    rp = profile.get("route_progress", {})
+    if isinstance(rp, dict):
+        for rid, km in rp.items():
+            try:
+                kmf = float(km)
+            except Exception:
+                continue
+            # store into free.progress_km as a general cache (harmless even if rid is pro)
+            free["progress_km"].setdefault(rid, round(kmf, 3))
+
+            # if pro active, also mirror into pro.routes (status default running)
+            if pro.get("active"):
+                rec = pro["routes"].get(rid)
+                if not isinstance(rec, dict):
+                    rec = {"km": 0.0, "status": "running", "finished_at": None}
+                rec.setdefault("km", 0.0)
+                rec.setdefault("status", "running")
+                rec.setdefault("finished_at", None)
+                rec["km"] = round(kmf, 3)
+                pro["routes"][rid] = rec
+
+    # If route_progress missing but history exists, we can lazily fill later in app.py;
+    # keep v3 structure valid.
+
+    return data
 
 
 def _parse_date_yyyy_mm_dd(s: str) -> Optional[date]:
@@ -332,7 +451,240 @@ def add_run_km(
 
     data["meta"]["updated_at"] = _now_iso()
     return data
+    
+def add_run_km_pro(
+    data: Dict[str, Any],
+    km: float,
+    run_date: Optional[str] = None,
+    mode: str = "merge",
+    note: str = ""
+) -> Dict[str, Any]:
+    """
+    Phase 4.5.1
+    Pro 模式：一次输入 km，同步推进所有 Pro 路线（profile.v3.pro.routes 里的所有 rid）
 
+    - 会为每条 Pro 路线写入一条 history 记录（按 mode merge/append）
+    - 会同步更新：
+        * profile.route_progress[rid]
+        * profile.v3.pro.routes[rid].km
+    - 会复用 add_run_km 的全局 profile 重算逻辑（total_km / streak 等）
+    """
+    if km <= 0:
+        raise ValueError("km must be > 0")
+
+    # 确保 v3 结构存在（你的 load_data 已经会 heal，但这里再稳一层）
+    ensure_profile_v3(data)
+
+    profile = data.setdefault("profile", {})
+    v3 = profile.setdefault("v3", {})
+    pro = v3.setdefault("pro", {})
+    routes = pro.setdefault("routes", {})
+
+    if not isinstance(routes, dict) or len(routes) == 0:
+        # 没有 Pro 路线就直接返回（Dashboard 会提示）
+        return data
+
+    # 统一日期
+    if run_date is None:
+        run_date = _today_str()
+
+    # 逐条 Pro 路线写入跑量
+    for rid in list(routes.keys()):
+        # 1) 切换当前路线（复用 add_run_km 的写入逻辑）
+        profile["current_route_id"] = rid
+
+        # 2) 写入 history（同日同路线 merge）
+        add_run_km(data, km=float(km), run_date=run_date, mode=mode, note=note)
+
+        # 3) 立刻重算该路线的累计（以 history 为准）
+        route_sum = 0.0
+        for h in data.get("history", []):
+            if h.get("route_id") == rid:
+                try:
+                    route_sum += float(h.get("km", 0.0))
+                except Exception:
+                    pass
+
+        # 4) 同步到两个缓存位（给 app.py / Dashboard 用）
+        profile.setdefault("route_progress", {})
+        profile["route_progress"][rid] = round(route_sum, 3)
+
+        rec = routes.get(rid)
+        if not isinstance(rec, dict):
+            rec = {"km": 0.0, "status": "running", "finished_at": None}
+        rec.setdefault("status", "running")
+        rec.setdefault("finished_at", None)
+        rec["km"] = round(route_sum, 3)
+        routes[rid] = rec
+
+    # 写回
+    pro["routes"] = routes
+    v3["pro"] = pro
+    profile["v3"] = v3
+    data["profile"] = profile
+    data["meta"]["updated_at"] = _now_iso()
+    return data
+
+def add_daily_km(
+    data: Dict[str, Any],
+    km: float,
+    route_ids: List[str],
+    run_date: Optional[str] = None,
+    mode: str = "merge",
+    note: str = ""
+) -> Dict[str, Any]:
+    """
+    Phase 4.2: One input -> apply to multiple routes (broadcast).
+
+    Implementation strategy:
+      - Reuse add_run_km() by temporarily setting profile.current_route_id
+      - After writing history, recompute per-route progress_km (route_progress + v3 mirrors)
+    """
+    if not route_ids:
+        raise ValueError("route_ids must be non-empty")
+    if km <= 0:
+        raise ValueError("km must be > 0")
+
+    profile = data.setdefault("profile", {})
+    legacy_cur = profile.get("current_route_id")
+
+    # write into history for each route
+    for rid in route_ids:
+        profile["current_route_id"] = rid
+        add_run_km(data, km=float(km), run_date=run_date, mode=mode, note=note)
+
+    # restore legacy current route id (best effort)
+    if isinstance(legacy_cur, str) and legacy_cur.strip():
+        profile["current_route_id"] = legacy_cur
+
+    # recompute per-route progress from history
+    rp = profile.setdefault("route_progress", {})
+    hist: List[Dict[str, Any]] = data.get("history", [])
+    for rid in route_ids:
+        s = 0.0
+        for h in hist:
+            if h.get("route_id") == rid:
+                try:
+                    s += float(h.get("km", 0.0))
+                except Exception:
+                    pass
+        rp[rid] = round(s, 3)
+
+    # mirror into v3 caches if present
+    v3 = profile.get("v3")
+    if isinstance(v3, dict):
+        free = v3.get("free")
+        pro = v3.get("pro")
+        if isinstance(free, dict):
+            pk = free.setdefault("progress_km", {})
+            if isinstance(pk, dict):
+                for rid in route_ids:
+                    pk[rid] = float(rp.get(rid, 0.0))
+        if isinstance(pro, dict):
+            proutes = pro.setdefault("routes", {})
+            if isinstance(proutes, dict):
+                for rid in route_ids:
+                    rec = proutes.get(rid)
+                    if not isinstance(rec, dict):
+                        rec = {"km": 0.0, "status": "running", "finished_at": None}
+                    rec.setdefault("status", "running")
+                    rec.setdefault("finished_at", None)
+                    rec["km"] = float(rp.get(rid, 0.0))
+                    proutes[rid] = rec
+
+    data["meta"]["updated_at"] = _now_iso()
+    return data
+
+from datetime import datetime
+
+def check_pro_completion(
+    data: Dict[str, Any],
+    route_totals: Dict[str, float]
+) -> Dict[str, Any]:
+    """
+    Phase 4.3
+    Check whether any pro route has completed and trigger reward state.
+
+    Rules:
+    - Only works when profile.v3.mode == "pro"
+    - Only triggers when reward_state == "locked"
+    - First completed route wins (no multi-trigger)
+    """
+    profile = data.get("profile", {})
+    v3 = profile.get("v3", {})
+
+    if not isinstance(v3, dict):
+        return data
+
+    if v3.get("mode") != "pro":
+        return data
+
+    pro = v3.get("pro", {})
+    if not isinstance(pro, dict):
+        return data
+
+    # 已进入奖励流程，直接退出（防止重复触发）
+    if pro.get("reward_state") != "locked":
+        return data
+
+    routes = pro.get("routes", {})
+    if not isinstance(routes, dict):
+        return data
+
+    for rid, rec in routes.items():
+        if not isinstance(rec, dict):
+            continue
+
+        status = rec.get("status", "running")
+        km = float(rec.get("km", 0.0))
+        total = float(route_totals.get(rid, float("inf")))
+
+        if status == "running" and km >= total:
+            # 🎯 命中：第一条完成的 pro 路线
+            rec["status"] = "finished"
+            rec["finished_at"] = datetime.now().isoformat()
+
+            pro["reward_state"] = "pending"
+            pro["finished_route_id"] = rid
+
+            return data
+
+    return data
+
+from datetime import datetime
+
+def generate_reward_narrative(route_meta: dict) -> dict:
+    """
+    Phase 4.4
+    Generate a narrative reward message for a completed Pro route.
+    """
+    route_name = route_meta.get("name", "这条路线")
+    region = route_meta.get("region", "")
+    tags = route_meta.get("narrative_tags", [])
+
+    # 标题
+    title = f"你完成了 {route_name}"
+
+    # 叙事正文（轻文学，不夸张）
+    body_lines = [
+        f"这是一条横跨 {region} 的挑战路线。",
+        "在持续的奔跑中，你把零散的日子，连成了一条清晰的轨迹。"
+    ]
+
+    if tags:
+        body_lines.append(
+            "这条路线的关键词是：" + "、".join(tags) + "。"
+        )
+
+    body_lines.append(
+        "完成它，并不意味着终点，而是证明你已经具备继续向前的能力。"
+    )
+
+    return {
+        "title": title,
+        "body": "\n\n".join(body_lines),
+        "created_at": datetime.now().isoformat()
+    }
 
 def save_data(path: str, data: Dict[str, Any]) -> None:
     data["meta"]["updated_at"] = _now_iso()

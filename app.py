@@ -11,13 +11,15 @@ import uuid
 import textwrap
 import streamlit.components.v1 as components
 from openai import OpenAI
-from storage import load_data, save_data, add_run_km
+from storage import load_data, save_data, add_run_km, add_daily_km, check_pro_completion, add_run_km_pro
 from storage import recompute_profile, delete_runs_by_date, load_invites, save_invites, ensure_access_state
+from storage import generate_reward_narrative
 from datetime import date, timedelta
 
 # ---- Storage path (Streamlit Cloud safe) ----
 # Streamlit Community Cloud 上 repo 目录可能不可写；/tmp 是可写目录
 RW_STORAGE_DIR = os.getenv("RW_STORAGE_DIR", "/tmp/runningworld")
+
 def get_or_create_user_key() -> str:
     # Streamlit query params: first open has no uk -> generate -> write to URL -> rerun
     uk = st.query_params.get("uk")
@@ -65,7 +67,8 @@ _seed_invites_if_needed()
 ROUTES_DIR = "routes"
 
 # --- Phase 3.3: minimal commercialization gating ---
-FREE_ROUTE_IDS = {"nj_bj"}  # 早期：免费路线只放南京→北京
+FREE_ROUTE_IDS = {"js_free_nj_zj", "js_free_nj_cz"}
+PRO_ROUTE_IDS  = {"js_pro_nj_sz", "js_pro_nj_nt", "js_pro_nj_xz", "js_pro_nj_lyg"}
 PASS_DURATION_DAYS = 365
 ADMIN_TOKEN_ENV = "RW_ADMIN_TOKEN"
 
@@ -481,7 +484,7 @@ def render_clickable_cities(stops: list, km_done: float, meta: dict, route_id: s
 
         # 分配到列里（循环使用列）
         with cols[i % len(cols)]:
-            if st.button(label, key=f"city_btn__{route_id}__{c}", disabled=disabled):
+            if st.button(label, key=f"city_btn__{route_id}__{i}__{c}", disabled=disabled):
                 st.session_state[sel_key] = {"name": c, "status": status}
 
     chosen = st.session_state.get(sel_key)
@@ -778,6 +781,10 @@ if st.session_state.view == "picker":
 
     ent = prof.get("entitlements", {})
     has_all_routes = bool(ent.get("all_routes", False))
+    # --- Phase 4.5.2: Pro 用户默认进入 Dashboard ---
+    if has_all_routes:
+        st.session_state.view = "pro_dashboard"
+        st.rerun()
 
     for rid in routes.keys():
         s = sum(float(h.get("km", 0.0)) for h in rw_data.get("history", []) if h.get("route_id") == rid)
@@ -908,6 +915,204 @@ if st.session_state.view == "picker":
 
     st.stop()
 
+if st.session_state.view == "pro_dashboard":
+    st.title("🏁 Running World · Pro 控制台（四线同步）")
+
+    # 载入数据
+    rw_data = load_data(DATA_PATH)
+    ensure_access_state(rw_data)
+    save_data(DATA_PATH, rw_data)
+
+    profile = rw_data.get("profile", {})
+    v3 = profile.get("v3", {})
+    pro = v3.get("pro", {})
+    lock_pro = (str(pro.get("reward_state", "locked")) == "accepted")
+    pro_routes = pro.get("routes", {})
+
+    # 如果 pro.routes 为空：用 PRO_ROUTE_IDS 初始化
+    if not isinstance(pro_routes, dict):
+        pro_routes = {}
+
+    if len(pro_routes) == 0:
+        for rid in PRO_ROUTE_IDS:
+            pro_routes[rid] = {"km": 0.0, "status": "running", "finished_at": None}
+        pro["routes"] = pro_routes
+        v3["pro"] = pro
+        profile["v3"] = v3
+        rw_data["profile"] = profile
+        save_data(DATA_PATH, rw_data)
+
+    # 顶部导航
+    colX, colY = st.columns([3, 1])
+    with colX:
+        st.caption("一次输入今日跑量，四条 Pro 路线同步推进。")
+    with colY:
+        if st.button("🔙 返回路线选择"):
+            st.session_state.view = "picker"
+            st.rerun()
+
+    st.divider()
+
+    # 今日统一输入
+    add_km = st.number_input("今日新增（km）", min_value=0.0, value=0.0, step=1.0)
+
+    c1, c2 = st.columns([1, 3])
+    with c1:
+        go = st.button("✅ 同步提交", use_container_width=True, disabled=lock_pro)
+    with c2:
+        st.caption("提示：提交后会写入每条路线的 history（同日同路线自动合并）。")
+
+    if lock_pro:
+        st.info("🏁 Pro 挑战已结束：同步推进已锁定。")
+
+    if go and add_km > 0:
+        add_run_km_pro(rw_data, km=float(add_km), mode="merge")
+
+        # 保存
+        save_data(DATA_PATH, rw_data)
+
+        st.success("已同步推进四条 Pro 路线。")
+        st.rerun()
+
+    st.divider()
+        # --- Phase 4.5.3: 完成检测（为奖励 pending 做准备）---
+    from datetime import date as _date
+
+    profile = rw_data.get("profile", {})
+    v3 = profile.get("v3", {})
+    pro = v3.get("pro", {})
+    pro_routes = pro.get("routes", {})
+
+    # 兜底：保证结构存在
+    if not isinstance(pro_routes, dict):
+        pro_routes = {}
+        pro["routes"] = pro_routes
+
+    pro.setdefault("reward_state", "locked")          # locked/pending/accepted/declined
+    pro.setdefault("finished_route_id", None)         # 哪条触发领奖
+    pro.setdefault("reward_choice_at", None)
+
+    today_iso = _date.today().isoformat()
+
+    # 如果已经 pending，就不重复切换 finished_route_id
+    reward_state = str(pro.get("reward_state", "locked"))
+    pending_locked = (reward_state == "pending")
+
+    # 1) 扫描所有 Pro 路线：把“running -> finished”的转变找出来
+    newly_finished = []  # [(rid, total_km), ...]
+    for rid in PRO_ROUTE_IDS:
+        # 只处理 routes 里存在且 meta 也存在的路线
+        if rid not in routes:
+            continue
+
+        # 当前累计（以 history 为准）
+        route_sum = 0.0
+        for h in rw_data.get("history", []):
+            if h.get("route_id") == rid:
+                try:
+                    route_sum += float(h.get("km", 0.0))
+                except Exception:
+                    pass
+
+        # 总里程：用 nodes 自动推断（与你主页面一致）
+        try:
+            nodes_path = get_route_nodes_path(rid, routes[rid])
+            _, _, _, total_km = load_nodes(nodes_path)
+            total_km = float(total_km)
+        except Exception:
+            total_km = 0.0
+
+        # 读取/修复 pro_routes[rid]
+        rec = pro_routes.get(rid)
+        if not isinstance(rec, dict):
+            rec = {"km": 0.0, "status": "running", "finished_at": None}
+        rec.setdefault("status", "running")
+        rec.setdefault("finished_at", None)
+
+        # 写回 km（统一来源：history 汇总）
+        rec["km"] = round(route_sum, 3)
+
+        # 判断是否完赛
+        is_done = (total_km > 0 and route_sum >= total_km - 1e-6)
+
+        # 仅当从非 finished -> finished 时算“新完成”
+        if is_done and rec.get("status") != "finished":
+            rec["status"] = "finished"
+            rec["finished_at"] = today_iso
+            newly_finished.append((rid, total_km))
+
+        pro_routes[rid] = rec
+
+    # 2) 奖励状态机：只有在 locked/declined 且出现新完成时，才切 pending
+    #    accepted 时永远不再触发
+    if reward_state not in ("accepted", "pending"):
+        if newly_finished:
+            # 若一次提交导致多条完成：优先选择 total_km 最短的那条作为“第一触发”
+            newly_finished.sort(key=lambda x: x[1])
+            trigger_rid = newly_finished[0][0]
+
+            pro["reward_state"] = "pending"
+            pro["finished_route_id"] = trigger_rid
+            pro["reward_choice_at"] = today_iso
+
+    # 写回并持久化
+    pro["routes"] = pro_routes
+    v3["pro"] = pro
+    profile["v3"] = v3
+    rw_data["profile"] = profile
+    save_data(DATA_PATH, rw_data)
+    # --- Phase 4.5.3: pending 时显示领奖入口（放在完成检测之后，确保是最新状态）---
+    rw_data = load_data(DATA_PATH)  # 关键：读回最新 reward_state
+    pro = rw_data.get("profile", {}).get("v3", {}).get("pro", {})
+    if str(pro.get("reward_state")) == "pending":
+        frid = pro.get("finished_route_id")
+        st.info("🎁 有一条 Pro 路线已完成，奖励选择已解锁。")
+        if frid and st.button("前往领奖 / 做出选择", use_container_width=True):
+            st.session_state.active_route_id = frid
+            st.session_state.view = "main"
+            st.rerun()
+
+    # 渲染四条路线卡片（用你已有的 build_route_summary）
+    st.subheader("📊 四线进度总览")
+
+    rw_data = load_data(DATA_PATH)  # 读回一次，确保是最新
+    summaries = []
+    for rid in PRO_ROUTE_IDS:
+        if rid in routes:
+            summaries.append(build_route_summary(rid, routes[rid], rw_data))
+
+    # 排序：进行中在前，已完成在后；同状态按完成度高->低
+    status_rank = {"进行中": 0, "未开始": 1, "已完成": 2}
+    summaries.sort(key=lambda s: (status_rank.get(s["status"], 9), -s["pct"]))
+
+    cols = st.columns(2)
+    for i, s in enumerate(summaries):
+        with cols[i % 2]:
+            with st.container(border=True):
+                st.subheader(s["title"])
+                st.caption(f"{s['subtitle']}  ·  route_id: {s['rid']}")
+                st.progress(min(max(s["pct"], 0.0), 1.0))
+                st.write(f"**{s['km_done']:.1f} / {s['km_total']:.1f} km**  ·  {s['pct']*100:.2f}%")
+
+                if s["status"] == "已完成":
+                    st.write("🏁 已完成")
+                elif s["status"] == "进行中":
+                    st.write("🟢 进行中")
+                else:
+                    st.write("⚪ 未开始")
+
+                if s["last_date"]:
+                    st.caption(f"最近跑步：{s['last_date']}")
+                else:
+                    st.caption("最近跑步：暂无")
+
+                if st.button("进入路线详情", key=f"pro_enter_{s['rid']}"):
+                    st.session_state.active_route_id = s["rid"]
+                    st.session_state.view = "main"
+                    st.rerun()
+
+    st.stop()
+
 route_id = st.session_state.active_route_id
 meta = routes[route_id]
 
@@ -916,6 +1121,64 @@ nodes_path = get_route_nodes_path(route_id, meta)
 data, points, dists, total_km = load_nodes(nodes_path)
 
 st.title(f"🏃‍♂️ Running World · {meta.get('name', route_id)}")
+# =========================
+# Phase 4.6: Pro 奖励选择闸门（接受/拒绝）
+# =========================
+rw_data_gate = load_data(DATA_PATH)
+profile_gate = rw_data_gate.get("profile", {})
+ent_gate = profile_gate.get("entitlements", {})
+v3_gate = profile_gate.get("v3", {})
+pro_gate = v3_gate.get("pro", {})
+
+is_pro_user = bool(ent_gate.get("all_routes", False))
+reward_state = str(pro_gate.get("reward_state", "locked"))
+finished_rid = pro_gate.get("finished_route_id")
+
+# 仅当：Pro 用户 + pending + 当前页面正好是触发完成的那条路线，才显示领奖 UI
+if is_pro_user and reward_state == "pending" and finished_rid == route_id:
+    st.warning("🎁 你已完成一条 Pro 路线！现在可以选择领取奖励，或继续挑战更高档。")
+
+    colR1, colR2 = st.columns(2)
+    with colR1:
+        accept_reward = st.button("🏅 接受奖励（结束本次 Pro 挑战）", use_container_width=True)
+    with colR2:
+        decline_reward = st.button("🔥 拒绝奖励（继续挑战更高档）", use_container_width=True)
+
+    if accept_reward:
+        pro_gate["reward_state"] = "accepted"
+        pro_gate["reward_choice_at"] = date.today().isoformat()
+        # accepted：你原需求是“全结束”，这里顺手把 pro.active 关掉（可选，但推荐）
+        pro_gate["active"] = False
+        v3_gate["pro"] = pro_gate
+        profile_gate["v3"] = v3_gate
+        rw_data_gate["profile"] = profile_gate
+        save_data(DATA_PATH, rw_data_gate)
+        st.success("已领取奖励：本次 Pro 挑战已结束。")
+        st.rerun()
+
+    if decline_reward:
+        pro_gate["reward_state"] = "declined"
+        pro_gate["reward_choice_at"] = date.today().isoformat()
+        # declined：清空触发者，让下一条完成时再进入 pending（Phase 4.5.3 会重新写入）
+        pro_gate["finished_route_id"] = None
+        v3_gate["pro"] = pro_gate
+        profile_gate["v3"] = v3_gate
+        rw_data_gate["profile"] = profile_gate
+        save_data(DATA_PATH, rw_data_gate)
+        st.info("你选择继续挑战：奖励已暂时搁置，完成下一条路线后将再次触发。")
+        st.rerun()
+
+# accepted 后：可选择在单路线页面也提示“已封盘”
+if is_pro_user and reward_state == "accepted":
+    st.info("🏁 Pro 挑战已结束（已接受奖励）。如需继续推进，请在后续版本开启新赛季或重置。")
+
+# Pro 用户：提供返回 Dashboard
+rw_data_tmp = load_data(DATA_PATH)
+ent_tmp = rw_data_tmp.get("profile", {}).get("entitlements", {})
+if bool(ent_tmp.get("all_routes", False)):
+    if st.button("⬅️ 返回 Pro 控制台"):
+        st.session_state.view = "pro_dashboard"
+        st.rerun()
 
 KEY_CITIES = meta.get("key_cities", [])
 
@@ -927,6 +1190,56 @@ if "rw_data" not in st.session_state:
 
 rw_data = st.session_state.rw_data
 profile = rw_data["profile"]
+# ===== Phase 4.3: Pro completion reward UI =====
+v3 = profile.get("v3", {})
+pro = v3.get("pro", {})
+
+if v3.get("mode") == "pro" and pro.get("reward_state") == "pending":
+    # Phase 4.4: generate narrative reward once
+    if not pro.get("reward_narrative"):
+        rid = pro.get("finished_route_id")
+        route_meta = routes.get(rid, {})
+        narrative = generate_reward_narrative(route_meta)
+        pro["reward_narrative"] = narrative
+        save_data(DATA_PATH, rw_data)
+
+    narr = pro.get("reward_narrative", {}) or {}
+
+    title = narr.get("title") or "你完成了一条 Pro 路线"
+    body = narr.get("body") or ""
+
+    st.markdown(f"## 🎁 {title}")
+
+    if body.strip():
+        st.markdown(
+            f"<div style='white-space: pre-line; font-size: 1.05em; line-height: 1.6;'>"
+            f"{body}"
+            f"</div>",
+            unsafe_allow_html=True
+        )
+
+    st.markdown("---")
+    st.write("现在你可以选择：")
+
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        if st.button("🎉 接受奖励（结束本次挑战）", key="reward_accept"):
+            pro["reward_state"] = "accepted"
+            pro["reward_choice_at"] = date.today().isoformat()
+            save_data(DATA_PATH, rw_data)
+            st.success("奖励已接受，本次 Pro 挑战圆满完成。")
+            st.rerun()
+
+    with col2:
+        if st.button("🚀 拒绝奖励（继续推进更高难度）", key="reward_decline"):
+            pro["reward_state"] = "declined"
+            pro["reward_choice_at"] = date.today().isoformat()
+            save_data(DATA_PATH, rw_data)
+            st.info("你选择继续挑战，旅程仍在延伸。")
+            st.rerun()
+
 # ===== per-route session keys =====
 rk_key   = f"route_km__{route_id}"
 prev_key = f"prev_route_km__{route_id}"
@@ -947,6 +1260,11 @@ if last_key not in st.session_state:
 
 # 侧边栏：输入累计跑量
 st.sidebar.header("📏 跑量输入")
+rw_data_lock = load_data(DATA_PATH)
+pro_lock = rw_data_lock.get("profile", {}).get("v3", {}).get("pro", {})
+reward_state_lock = str(pro_lock.get("reward_state", "locked"))
+lock_inputs = (reward_state_lock == "accepted")
+
 # --- 累计跑量：用 session_state 记住 ---
 
 add_km = st.sidebar.number_input(
@@ -958,30 +1276,72 @@ add_km = st.sidebar.number_input(
 
 colA, colB = st.sidebar.columns(2)
 with colA:
-    submit = st.sidebar.button("✅ 提交今日跑量")
+    submit = st.sidebar.button("✅ 提交今日跑量", disabled=lock_inputs)
 with colB:
-    undo = st.sidebar.button("↩ 撤销一次")
+    undo = st.sidebar.button("↩ 撤销一次", disabled=lock_inputs)
+if lock_inputs:
+    st.sidebar.info("Pro 挑战已结束：输入已锁定。")
 
 # 先处理按钮逻辑（写入 JSON 持久化）
 if submit and add_km > 0:
-    # 记录提交前累计：用于“今日高亮”
-    st.session_state[prev_key] = float(st.session_state[rk_key])
+    # 判断 v3 模式（默认 free）
+    v3 = profile.get("v3", {})
+    mode_v3 = "free"
+    if isinstance(v3, dict):
+        mode_v3 = str(v3.get("mode", "free"))
 
-    # 写入 JSON：同一天重复提交会 merge 到同一天记录里
-    rw_data["profile"]["current_route_id"] = route_id
-    add_run_km(rw_data, km=float(add_km), mode="merge")
-    save_data(DATA_PATH, rw_data)
-    # --- recompute this route's progress from history ---
-    route_sum = sum(
-        float(h.get("km", 0.0))
-        for h in rw_data.get("history", [])
-        if h.get("route_id") == route_id
-    )
-    profile.setdefault("route_progress", {})
-    profile["route_progress"][route_id] = round(route_sum, 3)
+    if mode_v3 == "pro":
+        target_ids = sorted(list(PRO_ROUTE_IDS))
+        # 记录每条路线提交前累计（用于各自地图的“今日高亮”）
+        for rid in target_ids:
+            pk = f"prev_route_km__{rid}"
+            rk = f"route_km__{rid}"
+            # 初始化缺失的 session key（避免第一次进某条路线看图时报错）
+            if rk not in st.session_state:
+                st.session_state[rk] = float(profile.get("route_progress", {}).get(rid, 0.0))
+            st.session_state[pk] = float(st.session_state[rk])
 
-    st.session_state[rk_key] = float(profile["route_progress"][route_id])
-    st.session_state[last_key] = float(add_km)
+        # ✅ 一次输入：广播到四条 pro 路线
+        add_daily_km(rw_data, km=float(add_km), route_ids=target_ids, mode="merge")
+        save_data(DATA_PATH, rw_data)
+        # Phase 4.3: completion & reward trigger
+        # Phase 4.3: completion & reward trigger (use real totals from nodes)
+        route_totals = {}
+        for rid in PRO_ROUTE_IDS:
+            m = routes.get(rid, {})
+            np = get_route_nodes_path(rid, m)
+            try:
+                _, _, _, tk = load_nodes(np)
+                route_totals[rid] = float(tk)
+            except Exception:
+                route_totals[rid] = 1e18  # fail-safe
+
+        check_pro_completion(rw_data, route_totals)
+        save_data(DATA_PATH, rw_data)
+
+
+        # 同步各路线 session_state
+        for rid in target_ids:
+            rk = f"route_km__{rid}"
+            st.session_state[rk] = float(rw_data["profile"].get("route_progress", {}).get(rid, 0.0))
+
+        # 用一个全局 last_add_km（pro 模式撤销要一起撤）
+        st.session_state["last_add_km__pro"] = float(add_km)
+    else:
+        # free：只推进当前路线
+        st.session_state[prev_key] = float(st.session_state[rk_key])
+        rw_data["profile"]["current_route_id"] = route_id
+        add_run_km(rw_data, km=float(add_km), mode="merge")
+        save_data(DATA_PATH, rw_data)
+
+        # recompute this route's progress from history
+        route_sum = sum(float(h.get("km", 0.0)) for h in rw_data.get("history", []) if h.get("route_id") == route_id)
+        profile.setdefault("route_progress", {})
+        profile["route_progress"][route_id] = round(route_sum, 3)
+
+        st.session_state[rk_key] = float(profile["route_progress"][route_id])
+        st.session_state[last_key] = float(add_km)
+
 
     # 读回（确保 UI 用到的是最新 profile）
     st.session_state.rw_data = load_data(DATA_PATH)

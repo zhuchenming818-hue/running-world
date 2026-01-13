@@ -1,0 +1,26 @@
+{
+  "id": "js_pro_nj_sz",
+  "name": "江苏挑战线 · 南京→苏州",
+  "region": "Jiangsu",
+  "tier": "pro",
+  "challenge_window_days": 30,
+  "pass_suggested_price_cny": 119,
+  "reward_tier": { "type": "shoe_or_gear", "cap_cny": 500 },
+  "profile": "foot",
+  "node_spacing_km": 0.5,
+  "waypoints": [
+    { "name": "南京", "lat": 32.0617, "lon": 118.778 },
+    { "name": "镇江", "lat": 32.21086, "lon": 119.45508 },
+    { "name": "常州", "lat": 31.77359, "lon": 119.95401 },
+    { "name": "无锡", "lat": 31.565372, "lon": 120.327583 },
+    { "name": "苏州", "lat": 31.299999, "lon": 120.599998 }
+  ],
+  "key_cities": [
+    { "name": "南京", "lat": 32.0617, "lon": 118.778 },
+    { "name": "镇江", "lat": 32.21086, "lon": 119.45508 },
+    { "name": "常州", "lat": 31.77359, "lon": 119.95401 },
+    { "name": "无锡", "lat": 31.565372, "lon": 120.327583 },
+    { "name": "苏州", "lat": 31.299999, "lon": 120.599998 }
+  ],
+  "narrative_tags": ["古城", "水网", "江南深处"]
+}

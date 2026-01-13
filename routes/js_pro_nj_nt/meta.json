@@ -1,0 +1,27 @@
+{
+  "id": "js_pro_nj_nt",
+  "name": "江苏耐力线 · 南京→如东",
+  "region": "Jiangsu",
+  "tier": "pro",
+  "challenge_window_days": 30,
+  "pass_suggested_price_cny": 119,
+  "reward_tier": { "type": "shoe_or_gear", "cap_cny": 800 },
+  "profile": "foot",
+  "node_spacing_km": 0.5,
+  "waypoints": [
+    { "name": "南京", "lat": 32.0617, "lon": 118.778 },
+    { "name": "镇江", "lat": 32.21086, "lon": 119.45508 },
+    { "name": "扬州", "lat": 32.3972, "lon": 119.436 },
+    { "name": "泰州", "lat": 32.455778, "lon": 119.923116 },
+    { "name": "南通", "lat": 32.0303, "lon": 120.875 },
+    { "name": "如东", "lat": 32.311, "lon": 121.189 }
+  ],
+  "key_cities": [
+    { "name": "南京", "lat": 32.0617, "lon": 118.778 },
+    { "name": "扬州", "lat": 32.3972, "lon": 119.436 },
+    { "name": "泰州", "lat": 32.455778, "lon": 119.923116 },
+    { "name": "南通", "lat": 32.0303, "lon": 120.875 },
+    { "name": "如东", "lat": 32.311, "lon": 121.189 }
+  ],
+  "narrative_tags": ["江海", "风", "开阔感"]
+}

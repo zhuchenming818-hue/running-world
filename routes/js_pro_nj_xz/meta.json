@@ -1,0 +1,26 @@
+{
+  "id": "js_pro_nj_xz",
+  "name": "江苏强者线 · 南京→徐州",
+  "region": "Jiangsu",
+  "tier": "pro",
+  "challenge_window_days": 30,
+  "pass_suggested_price_cny": 119,
+  "reward_tier": { "type": "shoe_or_gear", "cap_cny": 1200 },
+  "profile": "foot",
+  "node_spacing_km": 0.5,
+  "waypoints": [
+    { "name": "南京", "lat": 32.0617, "lon": 118.778 },
+    { "name": "扬州", "lat": 32.3972, "lon": 119.436 },
+    { "name": "淮安", "lat": 33.5039, "lon": 119.144 },
+    { "name": "宿迁", "lat": 33.965126, "lon": 118.270988 },
+    { "name": "徐州", "lat": 34.205769, "lon": 117.284126 }
+  ],
+  "key_cities": [
+    { "name": "南京", "lat": 32.0617, "lon": 118.778 },
+    { "name": "扬州", "lat": 32.3972, "lon": 119.436 },
+    { "name": "淮安", "lat": 33.5039, "lon": 119.144 },
+    { "name": "宿迁", "lat": 33.965126, "lon": 118.270988 },
+    { "name": "徐州", "lat": 34.205769, "lon": 117.284126 }
+  ],
+  "narrative_tags": ["纵贯", "边界", "坚持"]
+}
