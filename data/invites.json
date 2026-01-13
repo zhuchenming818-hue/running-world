@@ -1,0 +1,25 @@
+{
+  "RW-ALPHA-011": { "status": "new", "issued_to": "", "issued_at": "2026-01-13", "activated_at": "" },
+  "RW-ALPHA-012": { "status": "new", "issued_to": "", "issued_at": "2026-01-13", "activated_at": "" },
+  "RW-ALPHA-013": { "status": "new", "issued_to": "", "issued_at": "2026-01-13", "activated_at": "" },
+  "RW-ALPHA-014": { "status": "new", "issued_to": "", "issued_at": "2026-01-13", "activated_at": "" },
+  "RW-ALPHA-015": { "status": "new", "issued_to": "", "issued_at": "2026-01-13", "activated_at": "" },
+
+  "RW-ALPHA-016": { "status": "new", "issued_to": "", "issued_at": "2026-01-13", "activated_at": "" },
+  "RW-ALPHA-017": { "status": "new", "issued_to": "", "issued_at": "2026-01-13", "activated_at": "" },
+  "RW-ALPHA-018": { "status": "new", "issued_to": "", "issued_at": "2026-01-13", "activated_at": "" },
+  "RW-ALPHA-019": { "status": "new", "issued_to": "", "issued_at": "2026-01-13", "activated_at": "" },
+  "RW-ALPHA-020": { "status": "new", "issued_to": "", "issued_at": "2026-01-13", "activated_at": "" },
+
+  "RW-DEBUG-001": { "status": "new", "issued_to": "debug", "issued_at": "2026-01-13", "activated_at": "" },
+  "RW-DEBUG-002": { "status": "new", "issued_to": "debug", "issued_at": "2026-01-13", "activated_at": "" },
+  "RW-DEBUG-003": { "status": "new", "issued_to": "debug", "issued_at": "2026-01-13", "activated_at": "" },
+  "RW-DEBUG-004": { "status": "new", "issued_to": "debug", "issued_at": "2026-01-13", "activated_at": "" },
+  "RW-DEBUG-005": { "status": "new", "issued_to": "debug", "issued_at": "2026-01-13", "activated_at": "" },
+
+  "RW-PRO-TEST-01": { "status": "new", "issued_to": "pro-test", "issued_at": "2026-01-13", "activated_at": "" },
+  "RW-PRO-TEST-02": { "status": "new", "issued_to": "pro-test", "issued_at": "2026-01-13", "activated_at": "" },
+  "RW-PRO-TEST-03": { "status": "new", "issued_to": "pro-test", "issued_at": "2026-01-13", "activated_at": "" },
+  "RW-PRO-TEST-04": { "status": "new", "issued_to": "pro-test", "issued_at": "2026-01-13", "activated_at": "" },
+  "RW-PRO-TEST-05": { "status": "new", "issued_to": "pro-test", "issued_at": "2026-01-13", "activated_at": "" }
+}
