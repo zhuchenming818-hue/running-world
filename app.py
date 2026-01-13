@@ -11,7 +11,7 @@ import uuid
 import textwrap
 import streamlit.components.v1 as components
 from openai import OpenAI
-from storage import load_data, save_data, add_run_km, add_daily_km, check_pro_completion, add_run_km_pro
+from storage import load_data, save_data, add_run_km, check_pro_completion, add_run_km_pro
 from storage import recompute_profile, delete_runs_by_date, load_invites, save_invites, ensure_access_state
 from storage import generate_reward_narrative
 from datetime import date, timedelta
@@ -1301,24 +1301,13 @@ if submit and add_km > 0:
                 st.session_state[rk] = float(profile.get("route_progress", {}).get(rid, 0.0))
             st.session_state[pk] = float(st.session_state[rk])
 
-        # ✅ 一次输入：广播到四条 pro 路线
-        add_daily_km(rw_data, km=float(add_km), route_ids=target_ids, mode="merge")
-        save_data(DATA_PATH, rw_data)
-        # Phase 4.3: completion & reward trigger
-        # Phase 4.3: completion & reward trigger (use real totals from nodes)
-        route_totals = {}
-        for rid in PRO_ROUTE_IDS:
-            m = routes.get(rid, {})
-            np = get_route_nodes_path(rid, m)
-            try:
-                _, _, _, tk = load_nodes(np)
-                route_totals[rid] = float(tk)
-            except Exception:
-                route_totals[rid] = 1e18  # fail-safe
-
-        check_pro_completion(rw_data, route_totals)
+        # ✅ Phase 4.5+: Pro 同步推进（新逻辑）
+        add_run_km_pro(rw_data, km=float(add_km), mode="merge")
         save_data(DATA_PATH, rw_data)
 
+        # （可选）如果你仍希望在“单路线页输入”时也能立刻触发 pending，
+        # 那就在这里做一次轻量完成检测：直接复用你在 pro_dashboard 里写的完成检测器。
+        # 但为了避免重复逻辑，建议先不在这里做检测，统一由 pro_dashboard 负责触发。
 
         # 同步各路线 session_state
         for rid in target_ids:
