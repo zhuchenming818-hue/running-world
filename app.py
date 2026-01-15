@@ -9,6 +9,9 @@ import time
 import math
 import uuid
 import textwrap
+import base64
+import hashlib
+import hmac
 import streamlit.components.v1 as components
 from openai import OpenAI
 from storage import load_data, save_data, add_run_km, check_pro_completion, add_run_km_pro
@@ -20,21 +23,61 @@ from datetime import date, timedelta
 # Streamlit Community Cloud 上 repo 目录可能不可写；/tmp 是可写目录
 RW_STORAGE_DIR = os.getenv("RW_STORAGE_DIR", "/tmp/runningworld")
 
-def get_or_create_user_key() -> str:
-    # Streamlit query params: first open has no uk -> generate -> write to URL -> rerun
-    uk = st.query_params.get("uk")
-    if isinstance(uk, list):
-        uk = uk[0]
-    if not uk:
-        uk = "u_" + uuid.uuid4().hex
-        st.query_params["uk"] = uk
-        st.rerun()
-    return str(uk)
+RW_SECRET = os.getenv("RW_SECRET", "")
+if not RW_SECRET:
+    # DEV fallback. For production (500+ users), set RW_SECRET in Streamlit Secrets / env.
+    RW_SECRET = "DEV_ONLY_CHANGE_ME"
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("utf-8").rstrip("=")
+
+def _b64url_decode(s: str) -> bytes:
+    pad = "=" * (-len(s) % 4)
+    return base64.urlsafe_b64decode(s + pad)
+
+def sign_user_id(user_id: str) -> str:
+    sig = hmac.new(RW_SECRET.encode("utf-8"), user_id.encode("utf-8"), hashlib.sha256).digest()
+    return f"{_b64url(user_id.encode('utf-8'))}.{_b64url(sig)}"
+
+def verify_token(token: str) -> str | None:
+    try:
+        p1, p2 = token.split(".", 1)
+        user_id = _b64url_decode(p1).decode("utf-8")
+        sig = _b64url_decode(p2)
+        exp = hmac.new(RW_SECRET.encode("utf-8"), user_id.encode("utf-8"), hashlib.sha256).digest()
+        if hmac.compare_digest(sig, exp):
+            return user_id
+    except Exception:
+        pass
+    return None
+
+def get_or_create_user_id() -> str:
+    """
+    Secure identity: user_id is server-generated; URL only stores a signed token.
+    Users cannot switch to another user by editing the URL unless they have a valid token.
+    """
+    t = st.query_params.get("t")
+    if isinstance(t, list):
+        t = t[0]
+    if t:
+        user_id = verify_token(str(t))
+        if user_id:
+            return user_id
+
+    # First visit or invalid token -> mint a new identity
+    user_id = "u_" + uuid.uuid4().hex
+    token = sign_user_id(user_id)
+    st.query_params["t"] = token
+    # Remove legacy param if present
+    if "uk" in st.query_params:
+        del st.query_params["uk"]
+    st.rerun()
+    return user_id
 
 os.makedirs(RW_STORAGE_DIR, exist_ok=True)
 
-USER_KEY = get_or_create_user_key()
-DATA_PATH = os.path.join(RW_STORAGE_DIR, f"run_data_{USER_KEY}.json")
+USER_ID = get_or_create_user_id()
+DATA_PATH = os.path.join(RW_STORAGE_DIR, f"run_data_{USER_ID}.json")
 
 INVITES_PATH = os.path.join(RW_STORAGE_DIR, "invites.json")
 # --- Seed invites on first deploy (if /tmp invites empty) ---
@@ -722,6 +765,7 @@ if st.session_state.view == "picker":
     rw_data["profile"].setdefault("route_progress", {})
     # --- ensure Phase 3.3 fields exist (after storage schema upgrade) ---
     prof = rw_data["profile"]
+    prof.setdefault("user_id", USER_ID)
     prof.setdefault("auth", {"mode": "local", "invite_code": None, "user_key": None})
     prof.setdefault("pass", {"tier": "free", "status": "none", "starts_at": None, "ends_at": None, "source": "local", "notes": ""})
     prof.setdefault("entitlements", {"all_routes": False, "ai_basic": True, "ai_plus": False, "street_view": False})
