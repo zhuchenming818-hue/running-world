@@ -3,3 +3,5 @@ pydeck
 pandas
 requests
 openai
+boto3
+

@@ -8,6 +8,68 @@ from datetime import datetime, date, timedelta
 from typing import Any, Dict, List, Optional
 
 
+# --- R2 backend (S3-compatible) ---
+_BACKEND = os.getenv("RW_STORAGE_BACKEND", "local").strip().lower()
+
+def _is_r2() -> bool:
+    return _BACKEND == "r2"
+
+def _r2_client():
+    import boto3
+    endpoint = os.getenv("R2_ENDPOINT", "").strip()
+    access = os.getenv("R2_ACCESS_KEY_ID", "").strip()
+    secret = os.getenv("R2_SECRET_ACCESS_KEY", "").strip()
+    if not endpoint or not access or not secret:
+        raise RuntimeError("R2 env missing: R2_ENDPOINT / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY")
+
+    # region_name can be anything for R2; "auto" is commonly used
+    return boto3.client(
+        "s3",
+        endpoint_url=endpoint,
+        aws_access_key_id=access,
+        aws_secret_access_key=secret,
+        region_name="auto",
+    )
+
+def _r2_bucket() -> str:
+    b = os.getenv("R2_BUCKET", "").strip()
+    if not b:
+        raise RuntimeError("R2_BUCKET missing")
+    return b
+
+def _r2_key_for_path(path: str) -> str:
+    """
+    Keep app.py unchanged: infer object key from local filename.
+    run_data_<USER_ID>.json -> users/<USER_ID>/run_data.json
+    invites.json -> invites/invites.json
+    """
+    base = os.path.basename(path)
+    if base.startswith("run_data_") and base.endswith(".json"):
+        user_id = base[len("run_data_") : -len(".json")]
+        return f"users/{user_id}/run_data.json"
+    if base == "invites.json":
+        return "invites/invites.json"
+    # fallback: put under misc/
+    return f"misc/{base}"
+
+def _r2_get_json(key: str):
+    import json
+    s3 = _r2_client()
+    try:
+        obj = s3.get_object(Bucket=_r2_bucket(), Key=key)
+        raw = obj["Body"].read().decode("utf-8")
+        return json.loads(raw)
+    except Exception as e:
+        # NoSuchKey / 404 and other errors -> treat as missing
+        # boto3 exceptions vary; simplest is to just return None on failure here
+        return None
+
+def _r2_put_json(key: str, data):
+    import json
+    s3 = _r2_client()
+    body = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+    s3.put_object(Bucket=_r2_bucket(), Key=key, Body=body, ContentType="application/json; charset=utf-8")
+
 DEFAULT_DATA: Dict[str, Any] = {
     "meta": {
         "schema_version": 3,
@@ -108,15 +170,115 @@ def atomic_write_json(path: str, data: Dict[str, Any]) -> None:
             except OSError:
                 pass
 
+import time
+
+class FileLock:
+    def __init__(self, lock_path: str, timeout_s: float = 8.0, poll_s: float = 0.08):
+        self.lock_path = lock_path
+        self.timeout_s = timeout_s
+        self.poll_s = poll_s
+        self._fd = None
+
+    def __enter__(self):
+        start = time.time()
+        while True:
+            try:
+                # O_EXCL: atomic create -> only one winner
+                self._fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_RDWR)
+                os.write(self._fd, str(os.getpid()).encode("utf-8"))
+                return self
+            except FileExistsError:
+                if time.time() - start > self.timeout_s:
+                    raise TimeoutError(f"Could not acquire lock: {self.lock_path}")
+                time.sleep(self.poll_s)
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            if self._fd is not None:
+                os.close(self._fd)
+            if os.path.exists(self.lock_path):
+                os.remove(self.lock_path)
+        except Exception:
+            # Avoid masking original errors
+            pass
+        return False
+
+def _deepcopy_default() -> Dict[str, Any]:
+    """
+    Safe deep copy of DEFAULT_DATA to avoid shared references.
+    """
+    return json.loads(json.dumps(DEFAULT_DATA))
 
 def load_data(path: str) -> Dict[str, Any]:
     """
-    Load JSON, auto-heal missing keys with DEFAULT_DATA.
-    If file doesn't exist or corrupted, return a fresh copy.
+    Load per-user data from local filesystem OR R2 (depending on RW_STORAGE_BACKEND).
+    Keeps your existing schema heal/migration behaviour (v2/v3) to avoid breaking old users.
     """
+    if _is_r2():
+        key = _r2_key_for_path(path)
+        data = _r2_get_json(key)
+
+        if not isinstance(data, dict):
+            data = _deepcopy_default()
+            data.setdefault("meta", {})
+            data["meta"].setdefault("schema_version", 3)
+            data["meta"].setdefault("created_at", _now_iso())
+            data["meta"]["updated_at"] = data["meta"]["created_at"]
+            _r2_put_json(key, data)
+            return data
+
+        merged = _deepcopy_default()
+
+        # Shallow merge top-level keys
+        for k in merged.keys():
+            if k in data:
+                merged[k] = data[k]
+
+        # Ensure meta/profile exist
+        merged.setdefault("meta", {})
+        merged.setdefault("profile", {})
+        merged.setdefault("routes", {})
+        merged.setdefault("history", [])
+
+        # --- schema migrations/heal (keep consistent with your project) ---
+        ver = int((merged.get("meta") or {}).get("schema_version") or 1)
+
+        if ver < 2:
+            prof = merged.setdefault("profile", {})
+            prof.setdefault("auth", {"mode": "local", "invite_code": None, "user_key": None})
+            prof.setdefault("pass", {"tier": "free", "status": "none", "starts_at": None, "ends_at": None, "source": "local", "notes": ""})
+            prof.setdefault("entitlements", {"all_routes": False, "ai_basic": True, "ai_plus": False, "street_view": False})
+            prof.setdefault("route_progress", {})
+            merged.setdefault("meta", {})["schema_version"] = 2
+            ver = 2
+
+        if ver < 3:
+            ensure_profile_v3(merged)
+            merged.setdefault("meta", {})["schema_version"] = 3
+
+        # Ensure user_key exists (legacy field; keep for compatibility if your app expects it)
+        prof = merged.setdefault("profile", {})
+        auth = prof.setdefault("auth", {"mode": "local", "invite_code": None, "user_key": None})
+        uk = auth.get("user_key")
+        if not isinstance(uk, str) or not uk.strip():
+            auth["user_key"] = "u_" + uuid.uuid4().hex
+
+        ensure_access_state(merged)
+        ensure_profile_v3(merged)
+
+        merged["meta"].setdefault("created_at", _now_iso())
+        merged["meta"]["updated_at"] = _now_iso()
+
+        # Write back healed version (important for keeping future reads stable)
+        _r2_put_json(key, merged)
+        return merged
+
+    # -------- local filesystem mode --------
     if not os.path.exists(path):
-        data = json.loads(json.dumps(DEFAULT_DATA))
-        data["meta"]["created_at"] = _now_iso()
+        data = _deepcopy_default()
+        data.setdefault("meta", {})
+        data["meta"].setdefault("schema_version", 3)
+        data["meta"].setdefault("created_at", _now_iso())
         data["meta"]["updated_at"] = data["meta"]["created_at"]
         atomic_write_json(path, data)
         return data
@@ -125,81 +287,56 @@ def load_data(path: str) -> Dict[str, Any]:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except Exception:
-        # corrupted file: backup and reset
-        try:
-            os.replace(path, path + ".corrupted")
-        except OSError:
-            pass
-        data = json.loads(json.dumps(DEFAULT_DATA))
-        data["meta"]["created_at"] = _now_iso()
+        data = None
+
+    if not isinstance(data, dict):
+        data = _deepcopy_default()
+        data.setdefault("meta", {})
+        data["meta"].setdefault("schema_version", 3)
+        data["meta"].setdefault("created_at", _now_iso())
         data["meta"]["updated_at"] = data["meta"]["created_at"]
         atomic_write_json(path, data)
         return data
 
-    # merge defaults (shallow+some nested)
-    merged = json.loads(json.dumps(DEFAULT_DATA))
-    merged.update({k: data.get(k, merged[k]) for k in merged.keys()})
+    merged = _deepcopy_default()
+    for k in merged.keys():
+        if k in data:
+            merged[k] = data[k]
 
-    # nested merges
-    merged["meta"].update(data.get("meta", {}))
-    merged["profile"].update(data.get("profile", {}))
+    merged.setdefault("meta", {})
+    merged.setdefault("profile", {})
+    merged.setdefault("routes", {})
+    merged.setdefault("history", [])
 
-    # routes: keep user's routes if present, else defaults
-    merged["routes"] = data.get("routes", merged["routes"])
-    merged["history"] = data.get("history", merged["history"])
-    # --- schema migration: v1 -> v2 (Phase 3.3) ---
-    old_ver = int(merged.get("meta", {}).get("schema_version", 1) or 1)
-    if old_ver < 2:
+    ver = int((merged.get("meta") or {}).get("schema_version") or 1)
+
+    if ver < 2:
         prof = merged.setdefault("profile", {})
-
         prof.setdefault("auth", {"mode": "local", "invite_code": None, "user_key": None})
-        prof.setdefault("pass", {
-            "tier": "free",
-            "status": "none",
-            "starts_at": None,
-            "ends_at": None,
-            "source": "local",
-            "notes": ""
-        })
-        prof.setdefault("entitlements", {
-            "all_routes": False,
-            "ai_basic": True,
-            "ai_plus": False,
-            "street_view": False
-        })
+        prof.setdefault("pass", {"tier": "free", "status": "none", "starts_at": None, "ends_at": None, "source": "local", "notes": ""})
+        prof.setdefault("entitlements", {"all_routes": False, "ai_basic": True, "ai_plus": False, "street_view": False})
         prof.setdefault("route_progress", {})
-
         merged.setdefault("meta", {})["schema_version"] = 2
-        
-    # --- schema migration: v2 -> v3 (Phase 4.1) ---
-    # v3 introduces profile.v3 (free/pro parallel progress + reward state)
-    old_ver = int(merged.get("meta", {}).get("schema_version", 2) or 2)
-    if old_ver < 3:
+        ver = 2
+
+    if ver < 3:
         ensure_profile_v3(merged)
         merged.setdefault("meta", {})["schema_version"] = 3
-    # --- Phase 3.3.3: ensure stable anonymous user_key ---
+
     prof = merged.setdefault("profile", {})
     auth = prof.setdefault("auth", {"mode": "local", "invite_code": None, "user_key": None})
-
     uk = auth.get("user_key")
     if not isinstance(uk, str) or not uk.strip():
-        # stable anonymous id, e.g. u_2f7c1b3a9d4e4f0aa1c2d3e4f5a6b7c8
         auth["user_key"] = "u_" + uuid.uuid4().hex
-    # --- Phase 3.3.4: centralize pass/entitlements ---
+
     ensure_access_state(merged)
-    
-    # Phase 4.1: ensure v3 exists even for already-v3 files (healing)
     ensure_profile_v3(merged)
 
-    # ensure meta timestamps
-    if not merged["meta"].get("created_at"):
-        merged["meta"]["created_at"] = _now_iso()
+    merged["meta"].setdefault("created_at", _now_iso())
     merged["meta"]["updated_at"] = _now_iso()
 
-    # write back healed version
     atomic_write_json(path, merged)
     return merged
-    
 
 def ensure_profile_v3(data: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -687,7 +824,14 @@ def generate_reward_narrative(route_meta: dict) -> dict:
     }
 
 def save_data(path: str, data: Dict[str, Any]) -> None:
+    data.setdefault("meta", {})
     data["meta"]["updated_at"] = _now_iso()
+
+    if _is_r2():
+        key = _r2_key_for_path(path)
+        _r2_put_json(key, data)
+        return
+
     atomic_write_json(path, data)
 
 def recompute_profile(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -729,12 +873,16 @@ def delete_runs_by_date(
     data["meta"]["updated_at"] = _now_iso()
     return data
 
-def load_invites(path: str = INVITES_DEFAULT_PATH) -> Dict[str, Any]:
+def load_invites(path: str) -> Dict[str, Any]:
     """
-    Load invites.json safely. If missing, create an empty one.
-    Structure:
-      { "CODE": {"status":"new|used|revoked", "issued_to":"", "issued_at":"", "activated_at":""}, ... }
+    Invites are a shared object -> for R2 we load from invites/invites.json
+    Return {} if missing/corrupt.
     """
+    if _is_r2():
+        key = _r2_key_for_path(path)
+        data = _r2_get_json(key)
+        return data if isinstance(data, dict) else {}
+
     if not os.path.exists(path):
         atomic_write_json(path, {})
         return {}
@@ -742,22 +890,17 @@ def load_invites(path: str = INVITES_DEFAULT_PATH) -> Dict[str, Any]:
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        if not isinstance(data, dict):
-            return {}
-        return data
+        return data if isinstance(data, dict) else {}
     except Exception:
-        # corrupted file: backup and reset
-        try:
-            os.replace(path, path + ".corrupted")
-        except OSError:
-            pass
-        atomic_write_json(path, {})
         return {}
 
-
 def save_invites(path: str, invites: Dict[str, Any]) -> None:
-    atomic_write_json(path, invites)
+    if _is_r2():
+        key = _r2_key_for_path(path)
+        _r2_put_json(key, invites)
+        return
 
+    atomic_write_json(path, invites)
 
 def mark_invite_used(invites: Dict[str, Any], code: str, activated_at_iso: str) -> None:
     """
