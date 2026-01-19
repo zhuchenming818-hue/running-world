@@ -76,13 +76,7 @@ def _extract_token(x):
 
     return None
 
-def sync_token_with_localstorage():
-    """
-    Reliable URL <-> localStorage identity sync using streamlit-js-eval.
-
-    - If URL has ?t=..., store it into localStorage (rw_t).
-    - If URL has no t, read rw_t from localStorage and set query param in Python.
-    """
+def sync_token_with_localstorage(max_attempts: int = 3):
     # 1) read t from URL
     t = st.query_params.get("t")
     if isinstance(t, list):
@@ -91,35 +85,29 @@ def sync_token_with_localstorage():
     # 2) URL has t -> save to localStorage and continue
     if isinstance(t, str) and t.strip():
         token = t.strip()
-
-        # write token to localStorage (fire-and-forget)
         streamlit_js_eval(
             js_expressions=f"localStorage.setItem('rw_t', '{token}')",
             key="rw_set_token",
         )
-
-        # clear restore attempt flags
-        st.session_state.pop("_rw_restore_attempted", None)
+        st.session_state.pop("_rw_restore_tries", None)
         st.session_state.pop("_rw_restored", None)
         return
 
-    # 3) URL has no t -> try restore from localStorage (only attempt once per session)
+    # 3) URL has no t -> try restore from localStorage with retries
     if st.session_state.get("_rw_restored"):
         return
 
-    if not st.session_state.get("_rw_restore_attempted"):
-        st.session_state["_rw_restore_attempted"] = True
+    tries = int(st.session_state.get("_rw_restore_tries", 0))
+    if tries >= max_attempts:
+        # give up restoring; allow mint
+        st.session_state["_rw_restored"] = True
+        return
 
     raw = streamlit_js_eval(
         js_expressions="localStorage.getItem('rw_t')",
-        key="rw_get_token",
+        key=f"rw_get_token_{tries}",
     )
-
     ls_token = _extract_token(raw)
-
-    # 第一次运行有时会拿不到值（None），给它一次机会即可
-    if ls_token is None and st.session_state.get("_rw_restore_attempted") is True:
-        return
 
     if ls_token:
         st.session_state["_rw_restored"] = True
@@ -127,9 +115,10 @@ def sync_token_with_localstorage():
         st.query_params["t"] = ls_token
         st.rerun()
 
-    # no local token -> do nothing; downstream will mint new user
-    st.session_state["_rw_restored"] = True
-    return
+    # Not obtained yet -> increment tries and rerun, BUT do NOT allow mint in this run
+    st.session_state["_rw_restore_tries"] = tries + 1
+    st.info("Restoring your session… (reading browser storage)")
+    st.rerun()
 
 def get_or_create_user_id() -> str:
     # 1) 强制只读 t（忽略 uk 等任何旧字段）
@@ -160,6 +149,32 @@ def get_or_create_user_id() -> str:
 os.makedirs(RW_STORAGE_DIR, exist_ok=True)
 
 sync_token_with_localstorage()   # <- add this line
+
+DEBUG_ID = st.query_params.get("debug") == "1"
+
+if DEBUG_ID:
+    st.sidebar.subheader("DEBUG · Identity")
+
+    url_t = st.query_params.get("t")
+    if isinstance(url_t, list):
+        url_t = url_t[0]
+    st.sidebar.write("URL has t:", bool(url_t))
+
+    raw_ls = streamlit_js_eval(
+        js_expressions="localStorage.getItem('rw_t')",
+        key="rw_debug_ls",
+    )
+    ls_token = _extract_token(raw_ls)
+    st.sidebar.write("localStorage has rw_t:", bool(ls_token))
+    if isinstance(ls_token, str):
+        st.sidebar.write("rw_t prefix:", ls_token[:18])
+
+    # secret fingerprint (do NOT print secret)
+    secret_fp = hashlib.sha256(RW_SECRET.encode("utf-8")).hexdigest()[:10]
+    st.sidebar.write("RW_SECRET fp:", secret_fp)
+
+    if isinstance(url_t, str) and url_t.strip():
+        st.sidebar.write("verify(url_t):", bool(verify_token(url_t.strip())))
 
 USER_ID = get_or_create_user_id()
 DATA_PATH = os.path.join(RW_STORAGE_DIR, f"run_data_{USER_ID}.json")
