@@ -108,23 +108,22 @@ INVITES_LOCK_PATH = INVITES_PATH + ".lock"
 SEED_PATH = os.path.join("data", "invites_seed.json")
 
 def _seed_invites_if_needed():
+    """
+    Seed invites for both local and R2 backends.
+    - If current invites is empty/missing -> write seed into the active backend (R2 or local).
+    - Uses a file lock to avoid concurrent seeding.
+    """
     try:
-        # if invites file missing or empty dict => seed
-        if not os.path.exists(INVITES_PATH):
-            os.makedirs(os.path.dirname(INVITES_PATH), exist_ok=True)
-            with open(SEED_PATH, "r", encoding="utf-8") as f:
-                seed = json.load(f)
-            with open(INVITES_PATH, "w", encoding="utf-8") as f:
-                json.dump(seed, f, ensure_ascii=False, indent=2)
-            return
+        with FileLock(INVITES_LOCK_PATH):
+            cur = load_invites(INVITES_PATH)  # <-- IMPORTANT: uses backend-aware loader
+            if isinstance(cur, dict) and len(cur) > 0:
+                return
 
-        with open(INVITES_PATH, "r", encoding="utf-8") as f:
-            cur = json.load(f) if f.readable() else {}
-        if isinstance(cur, dict) and len(cur) == 0:
             with open(SEED_PATH, "r", encoding="utf-8") as f:
                 seed = json.load(f)
-            with open(INVITES_PATH, "w", encoding="utf-8") as f:
-                json.dump(seed, f, ensure_ascii=False, indent=2)
+
+            if isinstance(seed, dict) and len(seed) > 0:
+                save_invites(INVITES_PATH, seed)  # <-- IMPORTANT: writes to R2 when backend=r2
     except Exception:
         # fail-safe: don't block app startup
         pass
