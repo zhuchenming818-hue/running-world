@@ -53,16 +53,20 @@ def verify_token(token: str) -> str | None:
 
 def sync_token_with_localstorage():
     """
-    If URL has ?t=..., save it into localStorage.
-    If URL has no t, try restore t from localStorage by redirecting to ?t=...
+    URL <-> localStorage identity sync (safe)
+
+    - If URL has ?t=..., save into localStorage (rw_t) and continue.
+    - If URL has no t:
+        * 1st time: attempt redirect from localStorage and STOP (but show UI)
+        * 2nd time (still no t): assume redirect failed, continue (mint new user)
     """
     t = st.query_params.get("t")
     if isinstance(t, list):
         t = t[0]
 
+    # Case 1: URL already has t -> save to localStorage
     if isinstance(t, str) and t.strip():
         token = t.strip()
-        # Save token -> localStorage (no redirect)
         components.html(
             f"""
             <script>
@@ -73,26 +77,43 @@ def sync_token_with_localstorage():
             """,
             height=0,
         )
+        # clear the "attempted" flag if any
+        st.session_state.pop("_rw_ls_attempted", None)
         return
 
-    # No t in URL -> try restore from localStorage (redirect)
-    components.html(
-        """
-        <script>
-          try {
-            const token = localStorage.getItem("rw_t");
-            if (token && token.length > 10) {
-              const url = new URL(window.location.href);
-              url.searchParams.set("t", token);
-              window.location.replace(url.toString());
-            }
-          } catch (e) {}
-        </script>
-        """,
-        height=0,
-    )
-    # Very important: stop this run; let browser redirect
-    st.stop()
+    # Case 2: URL has no t -> try restore from localStorage
+    attempted = st.session_state.get("_rw_ls_attempted", False)
+
+    if not attempted:
+        st.session_state["_rw_ls_attempted"] = True
+
+        # Show something so it never becomes a "blank" page
+        st.info("Restoring your session… (reading browser storage)")
+
+        components.html(
+            """
+            <script>
+              try {
+                const token = localStorage.getItem("rw_t");
+                if (token && token.length > 10) {
+                  const url = new URL(window.top.location.href);
+                  url.searchParams.set("t", token);
+                  window.top.location.replace(url.toString());
+                }
+              } catch (e) {}
+            </script>
+            """,
+            height=0,
+        )
+
+        # Stop once, wait for redirect (or next rerun)
+        st.stop()
+
+    # If we are here: redirect attempt already happened but still no t.
+    # That means localStorage is empty/blocked, so continue and allow minting a new user.
+    st.warning("Could not restore session from browser storage. Creating a new session.")
+    st.session_state.pop("_rw_ls_attempted", None)
+    return
 
 def get_or_create_user_id() -> str:
     # 1) 强制只读 t（忽略 uk 等任何旧字段）
