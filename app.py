@@ -64,63 +64,68 @@ COOKIE_NAME = "rw_t"
 
 def get_or_create_user_id() -> str:
     """
-    Priority:
-      1) Cookie rw_t
-      2) URL ?t= (legacy) -> migrate to cookie
-      3) Mint new user_id -> set cookie
-    NOTE:
-      - On some deployments, cookie becomes readable only after one rerun.
-      - We allow at most ONE rerun using a session_state guard to avoid infinite loops.
+    Stable identity:
+    1) cookie rw_t (preferred)
+    2) session_state pending token (fallback to avoid remint within a session)
+    3) legacy query param ?t= (compatible)
+    4) mint new -> set cookie -> rerun ONCE to make cookie readable
     """
+
     cm = stx.CookieManager(key="rw_cookie_mgr")
 
-    # helper: read cookie token
-    def _read_cookie_token():
+    def _read_cookie_token() -> str | None:
         try:
             v = cm.get(COOKIE_NAME)
-            return v.strip() if isinstance(v, str) else None
+            if isinstance(v, str) and v.strip():
+                return v.strip()
         except Exception:
-            return None
+            pass
+        return None
 
-    # 1) Cookie first
+    # 1) cookie first
     ct = _read_cookie_token()
     if ct:
-        user_id = verify_token(ct)
-        if user_id:
-            return user_id
+        uid = verify_token(ct)
+        if uid:
+            return uid
 
-    # 2) URL fallback: ?t=
+    # 2) if we already minted during this session, reuse it (prevents remint loop)
+    pending = st.session_state.get("_pending_token")
+    if isinstance(pending, str) and pending.strip():
+        uid = verify_token(pending.strip())
+        if uid:
+            # try to persist again (harmless)
+            cm.set(COOKIE_NAME, pending.strip(), max_age=60 * 60 * 24 * 365)
+            return uid
+
+    # 3) legacy URL token ?t= (do NOT delete it; keep compatibility)
     t = st.query_params.get("t")
     if isinstance(t, list):
         t = t[0]
     if isinstance(t, str) and t.strip():
-        user_id = verify_token(t.strip())
-        if user_id:
+        uid = verify_token(t.strip())
+        if uid:
             cm.set(COOKIE_NAME, t.strip(), max_age=60 * 60 * 24 * 365)
-            # clean URL
-            try:
-                del st.query_params["t"]
-            except Exception:
-                pass
+            st.session_state["_pending_token"] = t.strip()
 
-            # allow one rerun to make cookie readable
+            # allow ONE rerun to make cookie readable
             if not st.session_state.get("_cookie_rerun_done", False):
                 st.session_state["_cookie_rerun_done"] = True
                 st.rerun()
+            return uid
 
-            return user_id
-
-    # 3) Mint new
-    user_id = "u_" + uuid.uuid4().hex
-    token = sign_user_id(user_id)
+    # 4) mint new
+    uid = "u_" + uuid.uuid4().hex
+    token = sign_user_id(uid)
     cm.set(COOKIE_NAME, token, max_age=60 * 60 * 24 * 365)
+    st.session_state["_pending_token"] = token
 
-    # allow one rerun to make cookie readable
+    # allow ONE rerun to make cookie readable
     if not st.session_state.get("_cookie_rerun_done", False):
         st.session_state["_cookie_rerun_done"] = True
         st.rerun()
 
-    return user_id
+    return uid
 
 os.makedirs(RW_STORAGE_DIR, exist_ok=True)
 
