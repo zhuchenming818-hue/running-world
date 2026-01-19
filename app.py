@@ -13,6 +13,7 @@ import base64
 import hashlib
 import hmac
 import streamlit.components.v1 as components
+from streamlit_js_eval import streamlit_js_eval
 from openai import OpenAI
 from storage import load_data, save_data, add_run_km, check_pro_completion, add_run_km_pro
 from storage import recompute_profile, delete_runs_by_date, load_invites, save_invites, ensure_access_state, FileLock
@@ -53,66 +54,55 @@ def verify_token(token: str) -> str | None:
 
 def sync_token_with_localstorage():
     """
-    URL <-> localStorage identity sync (safe)
+    Reliable URL <-> localStorage identity sync using streamlit-js-eval.
 
-    - If URL has ?t=..., save into localStorage (rw_t) and continue.
-    - If URL has no t:
-        * 1st time: attempt redirect from localStorage and STOP (but show UI)
-        * 2nd time (still no t): assume redirect failed, continue (mint new user)
+    - If URL has ?t=..., store it into localStorage (rw_t).
+    - If URL has no t, read rw_t from localStorage and set query param in Python.
     """
+    # 1) read t from URL
     t = st.query_params.get("t")
     if isinstance(t, list):
         t = t[0]
 
-    # Case 1: URL already has t -> save to localStorage
+    # 2) URL has t -> save to localStorage and continue
     if isinstance(t, str) and t.strip():
         token = t.strip()
-        components.html(
-            f"""
-            <script>
-              try {{
-                localStorage.setItem("rw_t", "{token}");
-              }} catch (e) {{}}
-            </script>
-            """,
-            height=0,
+
+        # write token to localStorage (fire-and-forget)
+        streamlit_js_eval(
+            js_expressions=f"localStorage.setItem('rw_t', '{token}')",
+            key="rw_set_token",
         )
-        # clear the "attempted" flag if any
-        st.session_state.pop("_rw_ls_attempted", None)
+
+        # clear restore attempt flags
+        st.session_state.pop("_rw_restore_attempted", None)
+        st.session_state.pop("_rw_restored", None)
         return
 
-    # Case 2: URL has no t -> try restore from localStorage
-    attempted = st.session_state.get("_rw_ls_attempted", False)
+    # 3) URL has no t -> try restore from localStorage (only attempt once per session)
+    if st.session_state.get("_rw_restored"):
+        return
 
-    if not attempted:
-        st.session_state["_rw_ls_attempted"] = True
+    if not st.session_state.get("_rw_restore_attempted"):
+        st.session_state["_rw_restore_attempted"] = True
 
-        # Show something so it never becomes a "blank" page
-        st.info("Restoring your session… (reading browser storage)")
+    ls_token = streamlit_js_eval(
+        js_expressions="localStorage.getItem('rw_t')",
+        key="rw_get_token",
+    )
 
-        components.html(
-            """
-            <script>
-              try {
-                const token = localStorage.getItem("rw_t");
-                if (token && token.length > 10) {
-                  const url = new URL(window.top.location.href);
-                  url.searchParams.set("t", token);
-                  window.top.location.replace(url.toString());
-                }
-              } catch (e) {}
-            </script>
-            """,
-            height=0,
-        )
+    # streamlit-js-eval may return None on first run; give it one rerun chance
+    if ls_token is None and st.session_state.get("_rw_restore_attempted") is True:
+        return
 
-        # Stop once, wait for redirect (or next rerun)
-        st.stop()
+    if isinstance(ls_token, str) and ls_token.strip():
+        st.session_state["_rw_restored"] = True
+        st.query_params.clear()
+        st.query_params["t"] = ls_token.strip()
+        st.rerun()
 
-    # If we are here: redirect attempt already happened but still no t.
-    # That means localStorage is empty/blocked, so continue and allow minting a new user.
-    st.warning("Could not restore session from browser storage. Creating a new session.")
-    st.session_state.pop("_rw_ls_attempted", None)
+    # no local token -> do nothing; downstream will mint new user
+    st.session_state["_rw_restored"] = True
     return
 
 def get_or_create_user_id() -> str:

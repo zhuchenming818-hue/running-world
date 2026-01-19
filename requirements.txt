@@ -4,5 +4,6 @@ pandas
 requests
 openai
 boto3
+streamlit-js-eval
 
 
