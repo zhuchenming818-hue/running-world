@@ -82,7 +82,7 @@ def _extract_token(x):
 
     return None
 
-def sync_token_with_localstorage(max_attempts: int = 3):
+def sync_token_with_localstorage(timeout_s: float = 2.5):
     # 1) read t from URL
     t = st.query_params.get("t")
     if isinstance(t, list):
@@ -95,23 +95,25 @@ def sync_token_with_localstorage(max_attempts: int = 3):
             js_expressions=f"localStorage.setItem('rw_t', '{token}')",
             key="rw_set_token",
         )
-        st.session_state.pop("_rw_restore_tries", None)
-        st.session_state.pop("_rw_restored", None)
-        return
-
-    # 3) URL has no t -> try restore from localStorage with retries
-    if st.session_state.get("_rw_restored"):
-        return
-
-    tries = int(st.session_state.get("_rw_restore_tries", 0))
-    if tries >= max_attempts:
-        # give up restoring; allow mint
+        # reset restore timers
+        st.session_state.pop("_rw_ls_start", None)
         st.session_state["_rw_restored"] = True
         return
 
+    # 3) URL has no t -> wait for localStorage to respond (do NOT fast-rerun)
+    if st.session_state.get("_rw_restored"):
+        return
+
+    # start a restore window
+    import time as _time
+    start = st.session_state.get("_rw_ls_start")
+    if not isinstance(start, (int, float)):
+        start = _time.time()
+        st.session_state["_rw_ls_start"] = start
+
     raw = streamlit_js_eval(
         js_expressions="localStorage.getItem('rw_t')",
-        key=f"rw_get_token_{tries}",
+        key="rw_get_token",   # IMPORTANT: keep key stable
     )
     ls_token = _extract_token(raw)
 
@@ -121,10 +123,15 @@ def sync_token_with_localstorage(max_attempts: int = 3):
         st.query_params["t"] = ls_token
         st.rerun()
 
-    # Not obtained yet -> increment tries and rerun, BUT do NOT allow mint in this run
-    st.session_state["_rw_restore_tries"] = tries + 1
-    st.info("Restoring your session… (reading browser storage)")
-    st.rerun()
+    # Not received yet: give the frontend time, stop this run
+    if _time.time() - start < timeout_s:
+        st.info("Restoring your session… (reading browser storage)")
+        st.stop()
+
+    # timeout: allow mint
+    st.session_state["_rw_restored"] = True
+    st.session_state.pop("_rw_ls_start", None)
+    return
 
 def get_or_create_user_id() -> str:
     # 1) 强制只读 t（忽略 uk 等任何旧字段）
