@@ -766,6 +766,13 @@ def generate_narration(
 
 # ---------- Streamlit 页面 ----------
 st.set_page_config(page_title="Running World", layout="wide")
+with st.expander("🔍 Debug Storage", expanded=False):
+    st.write("RW_STORAGE_DIR:", RW_STORAGE_DIR)
+    st.write("RW_STORAGE_BACKEND:", os.getenv("RW_STORAGE_BACKEND"))
+    st.write("R2_BUCKET set:", bool(os.getenv("R2_BUCKET")))
+    st.write("R2_ENDPOINT set:", bool(os.getenv("R2_ENDPOINT")))
+    st.write("RW_SECRET set:", bool(os.getenv("RW_SECRET")))
+
 routes = load_all_routes()
 if not routes:
     st.error("未找到 routes/*/meta.json")
