@@ -51,11 +51,51 @@ def verify_token(token: str) -> str | None:
         pass
     return None
 
+def sync_token_with_localstorage():
+    """
+    If URL has ?t=..., save it into localStorage.
+    If URL has no t, try restore t from localStorage by redirecting to ?t=...
+    """
+    t = st.query_params.get("t")
+    if isinstance(t, list):
+        t = t[0]
+
+    if isinstance(t, str) and t.strip():
+        token = t.strip()
+        # Save token -> localStorage (no redirect)
+        components.html(
+            f"""
+            <script>
+              try {{
+                localStorage.setItem("rw_t", "{token}");
+              }} catch (e) {{}}
+            </script>
+            """,
+            height=0,
+        )
+        return
+
+    # No t in URL -> try restore from localStorage (redirect)
+    components.html(
+        """
+        <script>
+          try {
+            const token = localStorage.getItem("rw_t");
+            if (token && token.length > 10) {
+              const url = new URL(window.location.href);
+              url.searchParams.set("t", token);
+              window.location.replace(url.toString());
+            }
+          } catch (e) {}
+        </script>
+        """,
+        height=0,
+    )
+    # Very important: stop this run; let browser redirect
+    st.stop()
+
 def get_or_create_user_id() -> str:
-    """
-    URL-based identity (stable baseline).
-    Uses query param ?t= as the sole identity anchor.
-    """
+    # 1) 强制只读 t（忽略 uk 等任何旧字段）
     t = st.query_params.get("t")
     if isinstance(t, list):
         t = t[0]
@@ -63,18 +103,26 @@ def get_or_create_user_id() -> str:
     if isinstance(t, str) and t.strip():
         user_id = verify_token(t.strip())
         if user_id:
+            # ✅ 已有稳定身份：顺手清理掉其它 query（比如 uk）
+            if len(st.query_params) != 1 or "t" not in st.query_params:
+                st.query_params.clear()
+                st.query_params["t"] = t.strip()
+                st.rerun()
             return user_id
 
-    # mint new identity
+    # 2) 没有合法 t：mint 新身份
     user_id = "u_" + uuid.uuid4().hex
     token = sign_user_id(user_id)
 
+    st.query_params.clear()
     st.query_params["t"] = token
     st.rerun()
 
     return user_id
 
 os.makedirs(RW_STORAGE_DIR, exist_ok=True)
+
+sync_token_with_localstorage()   # <- add this line
 
 USER_ID = get_or_create_user_id()
 DATA_PATH = os.path.join(RW_STORAGE_DIR, f"run_data_{USER_ID}.json")
