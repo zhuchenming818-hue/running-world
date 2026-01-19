@@ -13,19 +13,11 @@ import base64
 import hashlib
 import hmac
 import streamlit.components.v1 as components
-import extra_streamlit_components as stx
 from openai import OpenAI
 from storage import load_data, save_data, add_run_km, check_pro_completion, add_run_km_pro
 from storage import recompute_profile, delete_runs_by_date, load_invites, save_invites, ensure_access_state, FileLock
 from storage import generate_reward_narrative
 from datetime import date, timedelta
-
-# --- Clean legacy query param (uk) to keep URL stable ---
-try:
-    if "uk" in st.query_params:
-        del st.query_params["uk"]
-except Exception:
-    pass
 
 # ---- Storage path (Streamlit Cloud safe) ----
 # Streamlit Community Cloud 上 repo 目录可能不可写；/tmp 是可写目录
@@ -59,73 +51,28 @@ def verify_token(token: str) -> str | None:
         pass
     return None
 
-# ---- Cookie-based identity (Phase 4.7 Step1) ----
-COOKIE_NAME = "rw_t"
-
 def get_or_create_user_id() -> str:
     """
-    Stable identity:
-    1) cookie rw_t (preferred)
-    2) session_state pending token (fallback to avoid remint within a session)
-    3) legacy query param ?t= (compatible)
-    4) mint new -> set cookie -> rerun ONCE to make cookie readable
+    URL-based identity (stable baseline).
+    Uses query param ?t= as the sole identity anchor.
     """
-
-    cm = stx.CookieManager(key="rw_cookie_mgr")
-
-    def _read_cookie_token() -> str | None:
-        try:
-            v = cm.get(COOKIE_NAME)
-            if isinstance(v, str) and v.strip():
-                return v.strip()
-        except Exception:
-            pass
-        return None
-
-    # 1) cookie first
-    ct = _read_cookie_token()
-    if ct:
-        uid = verify_token(ct)
-        if uid:
-            return uid
-
-    # 2) if we already minted during this session, reuse it (prevents remint loop)
-    pending = st.session_state.get("_pending_token")
-    if isinstance(pending, str) and pending.strip():
-        uid = verify_token(pending.strip())
-        if uid:
-            # try to persist again (harmless)
-            cm.set(COOKIE_NAME, pending.strip(), max_age=60 * 60 * 24 * 365)
-            return uid
-
-    # 3) legacy URL token ?t= (do NOT delete it; keep compatibility)
     t = st.query_params.get("t")
     if isinstance(t, list):
         t = t[0]
+
     if isinstance(t, str) and t.strip():
-        uid = verify_token(t.strip())
-        if uid:
-            cm.set(COOKIE_NAME, t.strip(), max_age=60 * 60 * 24 * 365)
-            st.session_state["_pending_token"] = t.strip()
+        user_id = verify_token(t.strip())
+        if user_id:
+            return user_id
 
-            # allow ONE rerun to make cookie readable
-            if not st.session_state.get("_cookie_rerun_done", False):
-                st.session_state["_cookie_rerun_done"] = True
-                st.rerun()
-            return uid
+    # mint new identity
+    user_id = "u_" + uuid.uuid4().hex
+    token = sign_user_id(user_id)
 
-    # 4) mint new
-    uid = "u_" + uuid.uuid4().hex
-    token = sign_user_id(uid)
-    cm.set(COOKIE_NAME, token, max_age=60 * 60 * 24 * 365)
-    st.session_state["_pending_token"] = token
+    st.query_params["t"] = token
+    st.rerun()
 
-    # allow ONE rerun to make cookie readable
-    if not st.session_state.get("_cookie_rerun_done", False):
-        st.session_state["_cookie_rerun_done"] = True
-        st.rerun()
-
-    return uid
+    return user_id
 
 os.makedirs(RW_STORAGE_DIR, exist_ok=True)
 
@@ -796,10 +743,6 @@ def generate_narration(
 
 # ---------- Streamlit 页面 ----------
 st.set_page_config(page_title="Running World", layout="wide")
-
-with st.expander("🔍 Debug Identity", expanded=False):
-    st.write("query params:", dict(st.query_params))
-    st.write("USER_ID:", USER_ID)
 
 routes = load_all_routes()
 if not routes:
