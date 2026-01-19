@@ -20,6 +20,9 @@ from storage import recompute_profile, delete_runs_by_date, load_invites, save_i
 from storage import generate_reward_narrative
 from datetime import date, timedelta
 
+if "USER_ID" not in st.session_state:
+    st.session_state["USER_ID"] = None
+
 if "DEBUG_FORCE" not in st.session_state:
     st.session_state["DEBUG_FORCE"] = False
 
@@ -183,7 +186,11 @@ if DEBUG_ID:
     if isinstance(url_t, str) and url_t.strip():
         st.sidebar.write("verify(url_t):", bool(verify_token(url_t.strip())))
 
-USER_ID = get_or_create_user_id()
+if st.session_state["USER_ID"] is None:
+    st.session_state["USER_ID"] = get_or_create_user_id()
+
+USER_ID = st.session_state["USER_ID"]
+
 DATA_PATH = os.path.join(RW_STORAGE_DIR, f"run_data_{USER_ID}.json")
 
 INVITES_PATH = os.path.join(RW_STORAGE_DIR, "invites.json")
