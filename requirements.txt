@@ -4,4 +4,5 @@ pandas
 requests
 openai
 boto3
+extra-streamlit-components
 

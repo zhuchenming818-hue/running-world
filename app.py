@@ -13,9 +13,10 @@ import base64
 import hashlib
 import hmac
 import streamlit.components.v1 as components
+import extra_streamlit_components as stx
 from openai import OpenAI
 from storage import load_data, save_data, add_run_km, check_pro_completion, add_run_km_pro
-from storage import recompute_profile, delete_runs_by_date, load_invites, save_invites, ensure_access_state
+from storage import recompute_profile, delete_runs_by_date, load_invites, save_invites, ensure_access_state, FileLock
 from storage import generate_reward_narrative
 from datetime import date, timedelta
 
@@ -51,26 +52,46 @@ def verify_token(token: str) -> str | None:
         pass
     return None
 
+# ---- Cookie-based identity (Phase 4.7 Step1) ----
+COOKIE_NAME = "rw_t"   # stores signed token
+
 def get_or_create_user_id() -> str:
     """
-    Secure identity: user_id is server-generated; URL only stores a signed token.
-    Users cannot switch to another user by editing the URL unless they have a valid token.
+    Priority:
+      1) Cookie rw_t (stable across visits on same browser/device)
+      2) URL query param ?t=  (legacy / share link) -> migrate into cookie once
+      3) Mint new user_id + token, save to cookie (DO NOT write token back to URL)
     """
-    t = st.query_params.get("t")
-    if isinstance(t, list):
-        t = t[0]
-    if t:
-        user_id = verify_token(str(t))
+    cm = stx.CookieManager()
+
+    # 1) Cookie first
+    ct = cm.get(COOKIE_NAME)
+    if isinstance(ct, str) and ct.strip():
+        user_id = verify_token(ct.strip())
         if user_id:
             return user_id
 
-    # First visit or invalid token -> mint a new identity
+    # 2) URL fallback: if user comes with ?t=..., accept it and migrate to cookie
+    t = st.query_params.get("t")
+    if isinstance(t, list):
+        t = t[0]
+    if isinstance(t, str) and t.strip():
+        user_id = verify_token(t.strip())
+        if user_id:
+            # migrate to cookie for future visits
+            cm.set(COOKIE_NAME, t.strip(), max_age=60*60*24*365)  # 365 days
+            # optional: clean URL (remove t), so link stays constant & clean
+            try:
+                del st.query_params["t"]
+            except Exception:
+                pass
+            st.rerun()
+            return user_id
+
+    # 3) Mint new identity (cookie only)
     user_id = "u_" + uuid.uuid4().hex
     token = sign_user_id(user_id)
-    st.query_params["t"] = token
-    # Remove legacy param if present
-    if "uk" in st.query_params:
-        del st.query_params["uk"]
+    cm.set(COOKIE_NAME, token, max_age=60*60*24*365)  # 365 days
     st.rerun()
     return user_id
 
@@ -80,6 +101,8 @@ USER_ID = get_or_create_user_id()
 DATA_PATH = os.path.join(RW_STORAGE_DIR, f"run_data_{USER_ID}.json")
 
 INVITES_PATH = os.path.join(RW_STORAGE_DIR, "invites.json")
+INVITES_LOCK_PATH = INVITES_PATH + ".lock"
+
 # --- Seed invites on first deploy (if /tmp invites empty) ---
 SEED_PATH = os.path.join("data", "invites_seed.json")
 
@@ -785,42 +808,51 @@ if st.session_state.view == "picker":
 
         if st.button("激活", key="activate_pass"):
             code = (code or "").strip()
-            invites = load_invites(INVITES_PATH)  # 重新加载一次，避免缓存/并发误差
-            rec = invites.get(code)
-
-            if not isinstance(rec, dict):
-                st.error("邀请码不存在。")
-            elif rec.get("status") == "revoked":
-                st.error("邀请码已作废。")
-            elif rec.get("status") == "used":
-                st.error("邀请码已被使用。")
+            if not code:
+                st.error("邀请码不能为空。")
             else:
-                # ✅ 邀请码有效：激活季票
-                prof["auth"]["mode"] = "invite"
-                prof["auth"]["invite_code"] = code
+                try:
+                    with FileLock(INVITES_LOCK_PATH, timeout_s=8.0):
+                        # ⚠️ 进入锁后再 load 一次：确保读到的是“最新状态”
+                        invites = load_invites(INVITES_PATH)
+                        rec = invites.get(code)
 
-                starts = date.today()
-                ends = starts + timedelta(days=PASS_DURATION_DAYS)
+                        if not isinstance(rec, dict):
+                            st.error("邀请码不存在。")
+                        elif rec.get("status") == "revoked":
+                            st.error("邀请码已作废。")
+                        elif rec.get("status") == "used":
+                            st.error("邀请码已被使用。")
+                        else:
+                            # ✅ 邀请码有效：先写 invites.used（在锁里）
+                            rec["status"] = "used"
+                            rec["activated_at"] = date.today().isoformat()
+                            invites[code] = rec
+                            save_invites(INVITES_PATH, invites)
 
-                prof["pass"] = {
-                    "tier": "explorer",
-                    "status": "active",
-                    "starts_at": starts.isoformat(),
-                    "ends_at": ends.isoformat(),
-                    "source": "manual",
-                    "notes": "alpha"
-                }
-                ensure_access_state(rw_data)
+                            # ✅ 再写用户数据（DATA_PATH 是按 USER_ID 分文件的，不需要全局锁）
+                            prof["auth"]["mode"] = "invite"
+                            prof["auth"]["invite_code"] = code
 
-                # 标记邀请码 used
-                rec["status"] = "used"
-                rec["activated_at"] = date.today().isoformat()
-                invites[code] = rec
-                save_invites(INVITES_PATH, invites)
+                            starts = date.today()
+                            ends = starts + timedelta(days=PASS_DURATION_DAYS)
+                            prof["pass"] = {
+                                "tier": "explorer",
+                                "status": "active",
+                                "starts_at": starts.isoformat(),
+                                "ends_at": ends.isoformat(),
+                                "source": "manual",
+                                "notes": "alpha"
+                            }
+                            ensure_access_state(rw_data)
+                            save_data(DATA_PATH, rw_data)
 
-                save_data(DATA_PATH, rw_data)
-                st.success("✅ 已激活：探索季票已生效（全路线解锁）")
-                st.rerun()
+                            st.success("✅ 已激活：探索季票已生效（全路线解锁）")
+                            st.rerun()
+
+                except TimeoutError:
+                    st.warning("系统繁忙（多人同时激活中），请稍后再试一次。")
+
 
 
     ent = prof.get("entitlements", {})
@@ -930,15 +962,24 @@ if st.session_state.view == "picker":
                 with col2:
                     if st.button("作废", key="admin_revoke"):
                         rc = (revoke_code or "").strip()
-                        rec = invites.get(rc)
-                        if not isinstance(rec, dict):
-                            st.error("该邀请码不存在。")
+                        if not rc:
+                            st.error("请输入要作废的邀请码。")
                         else:
-                            rec["status"] = "revoked"
-                            invites[rc] = rec
-                            save_invites(INVITES_PATH, invites)
-                            st.success(f"✅ 已作废：{rc}")
-                            st.rerun()
+                            try:
+                                with FileLock(INVITES_LOCK_PATH, timeout_s=8.0):
+                                    invites = load_invites(INVITES_PATH)
+                                    rec = invites.get(rc)
+                                    if not isinstance(rec, dict):
+                                        st.error("该邀请码不存在。")
+                                    else:
+                                        rec["status"] = "revoked"
+                                        invites[rc] = rec
+                                        save_invites(INVITES_PATH, invites)
+                                        st.success(f"✅ 已作废：{rc}")
+                                        st.rerun()
+                            except TimeoutError:
+                                    st.warning("系统繁忙（多人同时操作邀请码），请稍后再试。")
+
 
                 # Table view (lightweight, no pandas needed)
                 rows = []
