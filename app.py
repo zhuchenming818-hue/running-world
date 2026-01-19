@@ -20,6 +20,13 @@ from storage import recompute_profile, delete_runs_by_date, load_invites, save_i
 from storage import generate_reward_narrative
 from datetime import date, timedelta
 
+# --- Clean legacy query param (uk) to keep URL stable ---
+try:
+    if "uk" in st.query_params:
+        del st.query_params["uk"]
+except Exception:
+    pass
+
 # ---- Storage path (Streamlit Cloud safe) ----
 # Streamlit Community Cloud 上 repo 目录可能不可写；/tmp 是可写目录
 RW_STORAGE_DIR = os.getenv("RW_STORAGE_DIR", "/tmp/runningworld")
@@ -59,23 +66,30 @@ def get_or_create_user_id() -> str:
     """
     Priority:
       1) Cookie rw_t
-      2) URL ?t= (legacy) -> migrate to cookie (no rerun)
-      3) Mint new user_id -> set cookie (no rerun)
+      2) URL ?t= (legacy) -> migrate to cookie
+      3) Mint new user_id -> set cookie
+    NOTE:
+      - On some deployments, cookie becomes readable only after one rerun.
+      - We allow at most ONE rerun using a session_state guard to avoid infinite loops.
     """
-    cm = stx.CookieManager(key="rw_cookie_mgr")  # 固定 key 更稳
+    cm = stx.CookieManager(key="rw_cookie_mgr")
+
+    # helper: read cookie token
+    def _read_cookie_token():
+        try:
+            v = cm.get(COOKIE_NAME)
+            return v.strip() if isinstance(v, str) else None
+        except Exception:
+            return None
 
     # 1) Cookie first
-    try:
-        ct = cm.get(COOKIE_NAME)
-    except Exception:
-        ct = None
-
-    if isinstance(ct, str) and ct.strip():
-        user_id = verify_token(ct.strip())
+    ct = _read_cookie_token()
+    if ct:
+        user_id = verify_token(ct)
         if user_id:
             return user_id
 
-    # 2) URL fallback (migrate once)
+    # 2) URL fallback: ?t=
     t = st.query_params.get("t")
     if isinstance(t, list):
         t = t[0]
@@ -83,17 +97,29 @@ def get_or_create_user_id() -> str:
         user_id = verify_token(t.strip())
         if user_id:
             cm.set(COOKIE_NAME, t.strip(), max_age=60 * 60 * 24 * 365)
-            # 清理 URL（不强制 rerun）
+            # clean URL
             try:
                 del st.query_params["t"]
             except Exception:
                 pass
+
+            # allow one rerun to make cookie readable
+            if not st.session_state.get("_cookie_rerun_done", False):
+                st.session_state["_cookie_rerun_done"] = True
+                st.rerun()
+
             return user_id
 
     # 3) Mint new
     user_id = "u_" + uuid.uuid4().hex
     token = sign_user_id(user_id)
     cm.set(COOKIE_NAME, token, max_age=60 * 60 * 24 * 365)
+
+    # allow one rerun to make cookie readable
+    if not st.session_state.get("_cookie_rerun_done", False):
+        st.session_state["_cookie_rerun_done"] = True
+        st.rerun()
+
     return user_id
 
 os.makedirs(RW_STORAGE_DIR, exist_ok=True)
@@ -765,12 +791,10 @@ def generate_narration(
 
 # ---------- Streamlit 页面 ----------
 st.set_page_config(page_title="Running World", layout="wide")
-with st.expander("🔍 Debug Storage", expanded=False):
-    st.write("RW_STORAGE_DIR:", RW_STORAGE_DIR)
-    st.write("RW_STORAGE_BACKEND:", os.getenv("RW_STORAGE_BACKEND"))
-    st.write("R2_BUCKET set:", bool(os.getenv("R2_BUCKET")))
-    st.write("R2_ENDPOINT set:", bool(os.getenv("R2_ENDPOINT")))
-    st.write("RW_SECRET set:", bool(os.getenv("RW_SECRET")))
+
+with st.expander("🔍 Debug Identity", expanded=False):
+    st.write("query params:", dict(st.query_params))
+    st.write("USER_ID:", USER_ID)
 
 routes = load_all_routes()
 if not routes:
