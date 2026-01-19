@@ -23,9 +23,6 @@ from datetime import date, timedelta
 if "USER_ID" not in st.session_state:
     st.session_state["USER_ID"] = None
 
-if "DEBUG_FORCE" not in st.session_state:
-    st.session_state["DEBUG_FORCE"] = False
-
 # ---- Storage path (Streamlit Cloud safe) ----
 # Streamlit Community Cloud 上 repo 目录可能不可写；/tmp 是可写目录
 RW_STORAGE_DIR = os.getenv("RW_STORAGE_DIR", "/tmp/runningworld")
@@ -162,36 +159,6 @@ def get_or_create_user_id() -> str:
 os.makedirs(RW_STORAGE_DIR, exist_ok=True)
 
 sync_token_with_localstorage()   # <- add this line
-
-with st.sidebar:
-    if st.button("🔍 Enable Debug"):
-        st.session_state["DEBUG_FORCE"] = True
-
-DEBUG_ID = st.session_state.get("DEBUG_FORCE", False)
-
-if DEBUG_ID:
-    st.sidebar.subheader("DEBUG · Identity")
-
-    url_t = st.query_params.get("t")
-    if isinstance(url_t, list):
-        url_t = url_t[0]
-    st.sidebar.write("URL has t:", bool(url_t))
-
-    raw_ls = streamlit_js_eval(
-        js_expressions="localStorage.getItem('rw_t')",
-        key="rw_debug_ls",
-    )
-    ls_token = _extract_token(raw_ls)
-    st.sidebar.write("localStorage has rw_t:", bool(ls_token))
-    if isinstance(ls_token, str):
-        st.sidebar.write("rw_t prefix:", ls_token[:18])
-
-    # secret fingerprint (do NOT print secret)
-    secret_fp = hashlib.sha256(RW_SECRET.encode("utf-8")).hexdigest()[:10]
-    st.sidebar.write("RW_SECRET fp:", secret_fp)
-
-    if isinstance(url_t, str) and url_t.strip():
-        st.sidebar.write("verify(url_t):", bool(verify_token(url_t.strip())))
 
 if st.session_state["USER_ID"] is None:
     st.session_state["USER_ID"] = get_or_create_user_id()
