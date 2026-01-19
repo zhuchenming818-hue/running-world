@@ -53,46 +53,47 @@ def verify_token(token: str) -> str | None:
     return None
 
 # ---- Cookie-based identity (Phase 4.7 Step1) ----
-COOKIE_NAME = "rw_t"   # stores signed token
+COOKIE_NAME = "rw_t"
 
 def get_or_create_user_id() -> str:
     """
     Priority:
-      1) Cookie rw_t (stable across visits on same browser/device)
-      2) URL query param ?t=  (legacy / share link) -> migrate into cookie once
-      3) Mint new user_id + token, save to cookie (DO NOT write token back to URL)
+      1) Cookie rw_t
+      2) URL ?t= (legacy) -> migrate to cookie (no rerun)
+      3) Mint new user_id -> set cookie (no rerun)
     """
-    cm = stx.CookieManager()
+    cm = stx.CookieManager(key="rw_cookie_mgr")  # 固定 key 更稳
 
     # 1) Cookie first
-    ct = cm.get(COOKIE_NAME)
+    try:
+        ct = cm.get(COOKIE_NAME)
+    except Exception:
+        ct = None
+
     if isinstance(ct, str) and ct.strip():
         user_id = verify_token(ct.strip())
         if user_id:
             return user_id
 
-    # 2) URL fallback: if user comes with ?t=..., accept it and migrate to cookie
+    # 2) URL fallback (migrate once)
     t = st.query_params.get("t")
     if isinstance(t, list):
         t = t[0]
     if isinstance(t, str) and t.strip():
         user_id = verify_token(t.strip())
         if user_id:
-            # migrate to cookie for future visits
-            cm.set(COOKIE_NAME, t.strip(), max_age=60*60*24*365)  # 365 days
-            # optional: clean URL (remove t), so link stays constant & clean
+            cm.set(COOKIE_NAME, t.strip(), max_age=60 * 60 * 24 * 365)
+            # 清理 URL（不强制 rerun）
             try:
                 del st.query_params["t"]
             except Exception:
                 pass
-            st.rerun()
             return user_id
 
-    # 3) Mint new identity (cookie only)
+    # 3) Mint new
     user_id = "u_" + uuid.uuid4().hex
     token = sign_user_id(user_id)
-    cm.set(COOKIE_NAME, token, max_age=60*60*24*365)  # 365 days
-    st.rerun()
+    cm.set(COOKIE_NAME, token, max_age=60 * 60 * 24 * 365)
     return user_id
 
 os.makedirs(RW_STORAGE_DIR, exist_ok=True)
