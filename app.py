@@ -24,9 +24,8 @@ from datetime import date, timedelta
 # Streamlit Community Cloud 上 repo 目录可能不可写；/tmp 是可写目录
 RW_STORAGE_DIR = os.getenv("RW_STORAGE_DIR", "/tmp/runningworld")
 
-RW_SECRET = os.getenv("RW_SECRET", "")
+RW_SECRET = os.getenv("RW_SECRET", "") or st.secrets.get("RW_SECRET", "")
 if not RW_SECRET:
-    # DEV fallback. For production (500+ users), set RW_SECRET in Streamlit Secrets / env.
     RW_SECRET = "DEV_ONLY_CHANGE_ME"
 
 def _b64url(data: bytes) -> str:
@@ -50,6 +49,31 @@ def verify_token(token: str) -> str | None:
             return user_id
     except Exception:
         pass
+    return None
+
+def _extract_token(x):
+    """Normalize streamlit_js_eval return value into a string token (or None)."""
+    if x is None:
+        return None
+
+    # common cases: direct string
+    if isinstance(x, str):
+        s = x.strip()
+        return s if s else None
+
+    # sometimes list-like
+    if isinstance(x, list) and x:
+        return _extract_token(x[0])
+
+    # sometimes dict-like
+    if isinstance(x, dict):
+        for k in ("value", "result", "data"):
+            if k in x:
+                return _extract_token(x.get(k))
+        # fallback: if single key dict, try its first value
+        if len(x) == 1:
+            return _extract_token(next(iter(x.values())))
+
     return None
 
 def sync_token_with_localstorage():
@@ -86,19 +110,21 @@ def sync_token_with_localstorage():
     if not st.session_state.get("_rw_restore_attempted"):
         st.session_state["_rw_restore_attempted"] = True
 
-    ls_token = streamlit_js_eval(
+    raw = streamlit_js_eval(
         js_expressions="localStorage.getItem('rw_t')",
         key="rw_get_token",
     )
 
-    # streamlit-js-eval may return None on first run; give it one rerun chance
+    ls_token = _extract_token(raw)
+
+    # 第一次运行有时会拿不到值（None），给它一次机会即可
     if ls_token is None and st.session_state.get("_rw_restore_attempted") is True:
         return
 
-    if isinstance(ls_token, str) and ls_token.strip():
+    if ls_token:
         st.session_state["_rw_restored"] = True
         st.query_params.clear()
-        st.query_params["t"] = ls_token.strip()
+        st.query_params["t"] = ls_token
         st.rerun()
 
     # no local token -> do nothing; downstream will mint new user
