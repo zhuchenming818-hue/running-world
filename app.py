@@ -20,6 +20,9 @@ from storage import recompute_profile, delete_runs_by_date, load_invites, save_i
 from storage import generate_reward_narrative
 from datetime import date, timedelta
 
+if "DEBUG_FORCE" not in st.session_state:
+    st.session_state["DEBUG_FORCE"] = False
+
 # ---- Storage path (Streamlit Cloud safe) ----
 # Streamlit Community Cloud 上 repo 目录可能不可写；/tmp 是可写目录
 RW_STORAGE_DIR = os.getenv("RW_STORAGE_DIR", "/tmp/runningworld")
@@ -150,7 +153,11 @@ os.makedirs(RW_STORAGE_DIR, exist_ok=True)
 
 sync_token_with_localstorage()   # <- add this line
 
-DEBUG_ID = st.query_params.get("debug") == "1"
+with st.sidebar:
+    if st.button("🔍 Enable Debug"):
+        st.session_state["DEBUG_FORCE"] = True
+
+DEBUG_ID = st.session_state.get("DEBUG_FORCE", False)
 
 if DEBUG_ID:
     st.sidebar.subheader("DEBUG · Identity")
