@@ -202,6 +202,8 @@ ROUTES_DIR = "routes"
 FREE_ROUTE_IDS = {"js_free_nj_zj", "js_free_nj_cz"}
 PRO_ROUTE_IDS  = {"js_pro_nj_sz", "js_pro_nj_nt", "js_pro_nj_xz", "js_pro_nj_lyg"}
 PASS_DURATION_DAYS = 365
+PRO_CHALLENGE_DAYS = 30
+MAX_DAILY_KM = 42.2
 ADMIN_TOKEN_ENV = "RW_ADMIN_TOKEN"
 
 def load_all_routes(routes_dir: str = ROUTES_DIR) -> dict:
@@ -863,6 +865,35 @@ if st.session_state.view == "picker":
     def _today():
         return date.today()
 
+    from datetime import datetime as _dt, date as _date
+
+    def _parse_yyyy_mm_dd_safe(s: str):
+        try:
+            return _dt.strptime(str(s), "%Y-%m-%d").date()
+        except Exception:
+            return None
+
+    def pro_input_allowed(profile: dict) -> tuple[bool, str]:
+        """
+        返回 (是否允许输入, 提示原因)
+        规则：一旦解锁 Pro（entitlements.all_routes True），从 pass.starts_at 起算 30 天后禁止输入。
+        """
+        ent = (profile or {}).get("entitlements", {}) or {}
+        if not bool(ent.get("all_routes", False)):
+            return True, ""
+
+        p = (profile or {}).get("pass", {}) or {}
+        starts = _parse_yyyy_mm_dd_safe(p.get("starts_at"))
+        if not starts:
+            # 没有 starts_at 就不硬禁（容错）
+            return True, ""
+
+        deadline = starts + timedelta(days=PRO_CHALLENGE_DAYS)  # 超过此日则禁用（第31天起）
+        today = _date.today()
+        if today >= deadline:
+            return False, f"⏳ 本月 Pro 挑战期为 {PRO_CHALLENGE_DAYS} 天，已于 {deadline.isoformat()} 起禁止继续输入。"
+        return True, ""
+
     # --- Activate pass UI ---
         # --- Activate pass UI (invites.json based) ---
     with st.expander("🔑 激活探索季票（邀请码）", expanded=False):
@@ -944,15 +975,8 @@ if st.session_state.view == "picker":
     for rid, meta in routes.items():
         summaries.append(build_route_summary(rid, meta, rw_data))
 
-    # 进行中优先，其次未开始，最后已完成；同状态内按最近日期（有日期的更靠前）
-    status_rank = {"进行中": 0, "未开始": 1, "已完成": 2}
-    summaries.sort(
-        key=lambda s: (
-            status_rank.get(s["status"], 9),
-            0 if s["last_date"] else 1,
-            "" if s["last_date"] is None else s["last_date"],
-        )
-    )
+    # 固定：按路线总长度从短到长（用户体验最直观）
+    summaries.sort(key=lambda s: (float(s.get("km_total", 0.0)), s["rid"]))
 
     # 三列卡片
     cols = st.columns(3)
@@ -1079,6 +1103,11 @@ if st.session_state.view == "pro_dashboard":
     v3 = profile.get("v3", {})
     pro = v3.get("pro", {})
     lock_pro = (str(pro.get("reward_state", "locked")) == "accepted")
+
+    allowed, reason = pro_input_allowed(profile)
+    if not allowed:
+        lock_pro = True
+
     pro_routes = pro.get("routes", {})
 
     # 如果 pro.routes 为空：用 PRO_ROUTE_IDS 初始化
@@ -1105,8 +1134,13 @@ if st.session_state.view == "pro_dashboard":
 
     st.divider()
 
+    # ✅ 超时提示：放在输入框上方（最贴近用户操作）
+    if reason:
+        st.warning(reason)
+
     # 今日统一输入
-    add_km = st.number_input("今日新增（km）", min_value=0.0, value=0.0, step=1.0)
+    MAX_DAILY_KM = 42.2
+    add_km = st.number_input("今日新增（km）", min_value=0.0, max_value=MAX_DAILY_KM, value=0.0, step=1.0)
 
     c1, c2 = st.columns([1, 3])
     with c1:
@@ -1118,6 +1152,10 @@ if st.session_state.view == "pro_dashboard":
         st.info("🏁 Pro 挑战已结束：同步推进已锁定。")
 
     if go and add_km > 0:
+        if add_km > MAX_DAILY_KM + 1e-9:
+            st.error(f"单日输入上限为 {MAX_DAILY_KM} km。")
+            st.stop()
+
         add_run_km_pro(rw_data, km=float(add_km), mode="merge")
 
         # 保存
@@ -1417,11 +1455,21 @@ pro_lock = rw_data_lock.get("profile", {}).get("v3", {}).get("pro", {})
 reward_state_lock = str(pro_lock.get("reward_state", "locked"))
 lock_inputs = (reward_state_lock == "accepted")
 
+allowed, reason = pro_input_allowed(rw_data_lock.get("profile", {}))
+if not allowed:
+    lock_inputs = True
+
+# ✅ 超时提示：放在输入框上方（最贴近用户操作）
+if reason:
+    st.sidebar.warning(reason)
+
 # --- 累计跑量：用 session_state 记住 ---
 
+MAX_DAILY_KM = 42.2
 add_km = st.sidebar.number_input(
     "今日新增（km）",
     min_value=0.0,
+    max_value=MAX_DAILY_KM,
     value=0.0,
     step=1.0,
 )
@@ -1436,6 +1484,10 @@ if lock_inputs:
 
 # 先处理按钮逻辑（写入 JSON 持久化）
 if submit and add_km > 0:
+    if add_km > MAX_DAILY_KM + 1e-9:
+        st.sidebar.error(f"单日输入上限为 {MAX_DAILY_KM} km。")
+        st.stop()
+
     # 判断 v3 模式（默认 free）
     v3 = profile.get("v3", {})
     mode_v3 = "free"
@@ -1566,7 +1618,7 @@ with st.sidebar.expander("高级：手动校准当前路线累计"):
         st.session_state[prev_key] = float(st.session_state[rk_key])
         st.rerun()
 
-use_ai = st.sidebar.checkbox("启用 AI 陪跑播报", value=True)
+use_ai = st.sidebar.checkbox("启用 AI 陪跑播报", value=False)
 
 # 定位当前位置
 current_km = float(st.session_state[rk_key])
