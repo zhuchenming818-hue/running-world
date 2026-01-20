@@ -724,46 +724,60 @@ def haversine_km(lat1, lon1, lat2, lon2) -> float:
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
     return R * c
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=86400)
 def reverse_geocode(lat: float, lon: float):
     """
     用 Nominatim(OSM) 逆地理编码：lat/lon -> city/state/country
-    cache_data 会自动缓存结果，避免频繁请求
+    重要：任何网络/限流/拒绝都必须降级返回，不能让 App 崩。
     """
     url = "https://nominatim.openstreetmap.org/reverse"
     params = {
         "format": "jsonv2",
         "lat": lat,
         "lon": lon,
-        "zoom": 10,           # 10 大致到 city 级别
+        "zoom": 10,
         "addressdetails": 1,
-        "accept-language": "zh-CN"
+        "accept-language": "zh-CN",
     }
     headers = {
-        # Nominatim 要求提供 User-Agent（别用默认的 python-requests）
         "User-Agent": "RunningWorldMVP/0.1 (contact: local-demo)"
     }
 
-    # 轻微延迟，进一步降低触发频控风险
+    # 轻微延迟，降低触发频控风险（可保留）
     time.sleep(0.2)
 
-    r = requests.get(url, params=params, headers=headers, timeout=10)
-    r.raise_for_status()
-    data = r.json()
-    addr = data.get("address", {})
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        addr = data.get("address", {}) if isinstance(data, dict) else {}
 
-    # Nominatim 的“城市”字段可能落在不同键里
-    city = (addr.get("city") or addr.get("town") or addr.get("county")
-            or addr.get("village") or addr.get("municipality") or addr.get("state_district"))
-    state = addr.get("state")
-    country = addr.get("country")
+        city = (
+            addr.get("city")
+            or addr.get("town")
+            or addr.get("county")
+            or addr.get("village")
+            or addr.get("municipality")
+            or addr.get("state_district")
+        )
+        state = addr.get("state")
+        country = addr.get("country")
 
-    return {
-        "display_name": data.get("display_name"),
-        "city": city,
-        "state": state,
-        "country": country
-    }
+        return {
+            "display_name": data.get("display_name") if isinstance(data, dict) else None,
+            "city": city,
+            "state": state,
+            "country": country,
+        }
+
+    except Exception:
+        # 降级：不要抛异常，返回空信息即可
+        return {
+            "display_name": None,
+            "city": None,
+            "state": None,
+            "country": None,
+        }
 
 @st.cache_resource(show_spinner=False)
 def get_openai_client():
