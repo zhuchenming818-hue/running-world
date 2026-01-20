@@ -18,7 +18,7 @@ from openai import OpenAI
 from storage import load_data, save_data, add_run_km, check_pro_completion, add_run_km_pro
 from storage import recompute_profile, delete_runs_by_date, load_invites, save_invites, ensure_access_state, FileLock
 from storage import generate_reward_narrative
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 
 if "USER_ID" not in st.session_state:
     st.session_state["USER_ID"] = None
@@ -205,6 +205,34 @@ PASS_DURATION_DAYS = 365
 PRO_CHALLENGE_DAYS = 30
 MAX_DAILY_KM = 42.2
 ADMIN_TOKEN_ENV = "RW_ADMIN_TOKEN"
+
+def _parse_yyyy_mm_dd_safe(s: str):
+    try:
+        return datetime.strptime(str(s), "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def pro_input_allowed(profile: dict) -> tuple[bool, str]:
+    """
+    返回 (是否允许输入, 提示原因)
+    规则：一旦解锁 Pro（entitlements.all_routes True），从 pass.starts_at 起算 30 天后禁止输入。
+    """
+    ent = (profile or {}).get("entitlements", {}) or {}
+    if not bool(ent.get("all_routes", False)):
+        return True, ""
+
+    p = (profile or {}).get("pass", {}) or {}
+    starts = _parse_yyyy_mm_dd_safe(p.get("starts_at"))
+    if not starts:
+        # 没有 starts_at 就不硬禁（容错）
+        return True, ""
+
+    deadline = starts + timedelta(days=PRO_CHALLENGE_DAYS)  # 第31天起禁止
+    today = date.today()
+    if today >= deadline:
+        return False, f"⏳ 本月 Pro 挑战期为 {PRO_CHALLENGE_DAYS} 天，已于 {deadline.isoformat()} 起禁止继续输入。"
+    return True, ""
 
 def load_all_routes(routes_dir: str = ROUTES_DIR) -> dict:
     routes = {}
@@ -864,35 +892,6 @@ if st.session_state.view == "picker":
 
     def _today():
         return date.today()
-
-    from datetime import datetime as _dt, date as _date
-
-    def _parse_yyyy_mm_dd_safe(s: str):
-        try:
-            return _dt.strptime(str(s), "%Y-%m-%d").date()
-        except Exception:
-            return None
-
-    def pro_input_allowed(profile: dict) -> tuple[bool, str]:
-        """
-        返回 (是否允许输入, 提示原因)
-        规则：一旦解锁 Pro（entitlements.all_routes True），从 pass.starts_at 起算 30 天后禁止输入。
-        """
-        ent = (profile or {}).get("entitlements", {}) or {}
-        if not bool(ent.get("all_routes", False)):
-            return True, ""
-
-        p = (profile or {}).get("pass", {}) or {}
-        starts = _parse_yyyy_mm_dd_safe(p.get("starts_at"))
-        if not starts:
-            # 没有 starts_at 就不硬禁（容错）
-            return True, ""
-
-        deadline = starts + timedelta(days=PRO_CHALLENGE_DAYS)  # 超过此日则禁用（第31天起）
-        today = _date.today()
-        if today >= deadline:
-            return False, f"⏳ 本月 Pro 挑战期为 {PRO_CHALLENGE_DAYS} 天，已于 {deadline.isoformat()} 起禁止继续输入。"
-        return True, ""
 
     # --- Activate pass UI ---
         # --- Activate pass UI (invites.json based) ---
